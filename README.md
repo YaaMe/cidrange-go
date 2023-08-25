@@ -1,6 +1,6 @@
 # cidrange-go
 
-Fast IP to CIDR non-overlap blocks lookup.
+Fast IP to CIDR blocks lookup.
 
 ## Getting Started
 
@@ -23,13 +23,27 @@ ipranger.Containstr("192.168.2.0") // returns false
 ## Benchmark
 
 ```go
-BenchmarkHitIPv4UsingAWSRanges-16     	13457113	        91.08 ns/op
-BenchmarkHitIPv6UsingAWSRanges-16     	 8231554	       141.2 ns/op
-BenchmarkMissIPv4UsingAWSRanges-16    	 9534981	       130.2 ns/op
-BenchmarkMissIPv6UsingAWSRanges-16    	 5942750	       218.3 ns/op
+BenchmarkHitIPv4UsingAWSRanges-16            	11635243	        94.09 ns/op
+BenchmarkHitIPv6UsingAWSRanges-16            	 8225546	       149.1 ns/op
+BenchmarkMissIPv4UsingAWSRanges-16           	 9654986	       122.0 ns/op
+BenchmarkMissIPv6UsingAWSRanges-16           	 6267660	       180.3 ns/op
+BenchmarkHitIPv4UsingAWSRangesOverlap-16     	12967574	        86.77 ns/op
+BenchmarkHitIPv6UsingAWSRangesOverlap-16     	 8048085	       146.8 ns/op
+BenchmarkMissIPv4UsingAWSRangesOverlap-16    	 9781345	       123.2 ns/op
+BenchmarkMissIPv6UsingAWSRangesOverlap-16    	 6108297	       181.1 ns/op
+BenchmarkHitIPv4UsingAWSRanges1Bucket-16     	  940128	      1234 ns/op
+BenchmarkHitIPv6UsingAWSRanges1Bucket-16     	 8836210	       130.6 ns/op
+BenchmarkMissIPv4UsingAWSRanges1Bucket-16    	16015999	        64.97 ns/op
+BenchmarkMissIPv6UsingAWSRanges1Bucket-16    	11910202	        97.63 ns/op
+BenchmarkHitIPv4UsingAWSRanges8Bucket-16     	13573425	        77.51 ns/op
+BenchmarkHitIPv6UsingAWSRanges8Bucket-16     	 8206742	       145.2 ns/op
+BenchmarkMissIPv4UsingAWSRanges8Bucket-16    	 3314006	       379.0 ns/op
+BenchmarkMissIPv6UsingAWSRanges8Bucket-16    	 4292500	       317.9 ns/op
+BenchmarkHitIPv4UsingSmallRanges-16          	 9780699	       118.6 ns/op
+BenchmarkMissIPv4UsingSmallRanges-16         	 8356198	       134.3 ns/op
 ```
 
-## algorithm explain
+## Algorithm Explain
 
 There's feature about ipmask(Set Theory):
 
@@ -79,3 +93,4 @@ In extreme case, if you get a block so large like `0.0.0.0/0`, it will fallback 
 
 what's more, the blocks are `non-overlap`. If you already get a prefixmatch cidr in `24=>32` mask range bucket, you haven't to find in `0=>24` buckets.
 
+If blocks are `overlap`, you have to check every buckets.

@@ -54,6 +54,15 @@ func (ranger *IPRanger) Contains(ip net.IP) bool {
 	}
 	return ranger.V6NetTree.Contains(ip)
 }
+func (ranger *IPRanger) OverlapContainstr(ip string) bool {
+	return ranger.OverlapContains(net.ParseIP(ip))
+}
+func (ranger *IPRanger) OverlapContains(ip net.IP) bool {
+	if ip.To4() != nil {
+		return ranger.V4NetTree.OverlapContains(ip)
+	}
+	return ranger.V6NetTree.OverlapContains(ip)
+}
 
 func (ranger *IPRanger) ViewMaskKeyList() ([]net.IPMask, []net.IPMask) {
 	return ranger.V4NetTree.maskKeyList, ranger.V6NetTree.maskKeyList
@@ -80,6 +89,22 @@ func (self *IPNetTree) Contains(ip net.IP) bool {
 	}
 	return false
 }
+
+func (self *IPNetTree) OverlapContains(ip net.IP) bool {
+	for _, mask := range self.maskKeyList {
+		ipkey := ip.Mask(mask)
+		cidrs, exists := self.maskTree[ipkey.String()]
+		if exists {
+			for _, cidr := range cidrs {
+				if cidr.Contains(ip) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func (self *IPNetTree) insertCIDR(cidr *net.IPNet) {
 	self.cidrs = append(self.cidrs, cidr)
 }

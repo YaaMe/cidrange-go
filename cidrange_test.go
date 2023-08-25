@@ -40,41 +40,54 @@ func TestBenchKey(t *testing.T) {
 }
 
 func BenchmarkHitIPv4UsingAWSRanges(b *testing.B) {
-	benchmarkContainsUsingAWSRanges(b, net.ParseIP("52.95.110.1"), NewIPRanger(), 2, 4)
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("52.95.110.1"), NewIPRanger(), 2, 4, true)
 }
 func BenchmarkHitIPv6UsingAWSRanges(b *testing.B) {
-	benchmarkContainsUsingAWSRanges(b, net.ParseIP("2620:107:300f::36b7:ff81"), NewIPRanger(), 2, 4)
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("2620:107:300f::36b7:ff81"), NewIPRanger(), 2, 4, true)
 }
 func BenchmarkMissIPv4UsingAWSRanges(b *testing.B) {
-	benchmarkContainsUsingAWSRanges(b, net.ParseIP("123.123.123.123"), NewIPRanger(), 2, 4)
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("123.123.123.123"), NewIPRanger(), 2, 4, true)
 }
 func BenchmarkMissIPv6UsingAWSRanges(b *testing.B) {
-	benchmarkContainsUsingAWSRanges(b, net.ParseIP("2620::ffff"), NewIPRanger(), 2, 4)
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("2620::ffff"), NewIPRanger(), 2, 4, true)
+}
+
+func BenchmarkHitIPv4UsingAWSRangesOverlap(b *testing.B) {
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("52.95.110.1"), NewIPRanger(), 2, 4, true)
+}
+func BenchmarkHitIPv6UsingAWSRangesOverlap(b *testing.B) {
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("2620:107:300f::36b7:ff81"), NewIPRanger(), 2, 4, true)
+}
+func BenchmarkMissIPv4UsingAWSRangesOverlap(b *testing.B) {
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("123.123.123.123"), NewIPRanger(), 2, 4, true)
+}
+func BenchmarkMissIPv6UsingAWSRangesOverlap(b *testing.B) {
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("2620::ffff"), NewIPRanger(), 2, 4, true)
 }
 
 func BenchmarkHitIPv4UsingAWSRanges1Bucket(b *testing.B) {
-	benchmarkContainsUsingAWSRanges(b, net.ParseIP("52.95.110.1"), NewIPRanger(), 1, 1)
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("52.95.110.1"), NewIPRanger(), 1, 1, true)
 }
 func BenchmarkHitIPv6UsingAWSRanges1Bucket(b *testing.B) {
-	benchmarkContainsUsingAWSRanges(b, net.ParseIP("2620:107:300f::36b7:ff81"), NewIPRanger(), 1, 1)
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("2620:107:300f::36b7:ff81"), NewIPRanger(), 1, 1, true)
 }
 func BenchmarkMissIPv4UsingAWSRanges1Bucket(b *testing.B) {
-	benchmarkContainsUsingAWSRanges(b, net.ParseIP("123.123.123.123"), NewIPRanger(), 1, 1)
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("123.123.123.123"), NewIPRanger(), 1, 1, true)
 }
 func BenchmarkMissIPv6UsingAWSRanges1Bucket(b *testing.B) {
-	benchmarkContainsUsingAWSRanges(b, net.ParseIP("2620::ffff"), NewIPRanger(), 1, 1)
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("2620::ffff"), NewIPRanger(), 1, 1, true)
 }
 func BenchmarkHitIPv4UsingAWSRanges8Bucket(b *testing.B) {
-	benchmarkContainsUsingAWSRanges(b, net.ParseIP("52.95.110.1"), NewIPRanger(), 8, 8)
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("52.95.110.1"), NewIPRanger(), 8, 8, true)
 }
 func BenchmarkHitIPv6UsingAWSRanges8Bucket(b *testing.B) {
-	benchmarkContainsUsingAWSRanges(b, net.ParseIP("2620:107:300f::36b7:ff81"), NewIPRanger(), 8, 8)
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("2620:107:300f::36b7:ff81"), NewIPRanger(), 8, 8, true)
 }
 func BenchmarkMissIPv4UsingAWSRanges8Bucket(b *testing.B) {
-	benchmarkContainsUsingAWSRanges(b, net.ParseIP("123.123.123.123"), NewIPRanger(), 8, 8)
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("123.123.123.123"), NewIPRanger(), 8, 8, true)
 }
 func BenchmarkMissIPv6UsingAWSRanges8Bucket(b *testing.B) {
-	benchmarkContainsUsingAWSRanges(b, net.ParseIP("2620::ffff"), NewIPRanger(), 8, 8)
+	benchmarkContainsUsingAWSRanges(b, net.ParseIP("2620::ffff"), NewIPRanger(), 8, 8, true)
 }
 func BenchmarkHitIPv4UsingSmallRanges(b *testing.B) {
 	ipranger := NewIPRanger()
@@ -95,10 +108,16 @@ func BenchmarkMissIPv4UsingSmallRanges(b *testing.B) {
 	}
 }
 
-func benchmarkContainsUsingAWSRanges(tb testing.TB, target net.IP, ipranger *IPRanger, v4bucket, v6bucket int) {
+func benchmarkContainsUsingAWSRanges(tb testing.TB, target net.IP, ipranger *IPRanger, v4bucket, v6bucket int, isNonOverlap bool) {
 	configureRangerWithAWSRanges(tb, ipranger, v4bucket, v6bucket)
-	for n := 0; n < tb.(*testing.B).N; n++ {
-		ipranger.Contains(target)
+	if isNonOverlap {
+		for n := 0; n < tb.(*testing.B).N; n++ {
+			ipranger.Contains(target)
+		}
+	} else {
+		for n := 0; n < tb.(*testing.B).N; n++ {
+			ipranger.OverlapContains(target)
+		}
 	}
 }
 
