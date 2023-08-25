@@ -77,5 +77,5 @@ ip `52.68.93.254` mask 24 get `52.68.93.0`, and then check `"52.68.93.4/31".Cont
 
 In extreme case, if you get a block so large like `0.0.0.0/0`, it will fallback to a traversal.So it maybe better to make some buckets, like `genTree(2)`
 
-what's more, the blocks are non-overlap. If you already get a prefixmatch cidr in `24=>32` mask range, you haven't to find in `0=>24`.
+what's more, the blocks are `non-overlap`. If you already get a prefixmatch cidr in `24=>32` mask range bucket, you haven't to find in `0=>24` buckets.
 
