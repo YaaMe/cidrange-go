@@ -11,7 +11,7 @@ ipranger.InsertCIDRStr("192.168.1.0/24")
 ipranger.InsertCIDRStr("128.168.1.0/24")
 ipranger.InsertCIDRStr("52.68.93.4/31")
 // It effect keys distribution base on blocks and mask numbers.
-// It's a tradeoff.
+// It's a tradeoff, default is 2 for ipv4 and 4 for ipv6.
 // The same mask will be distributed in the same bucket.
 // If there's a little blocks, 1 is ok.
 // More buckets here, more time will be cost on missing case.
@@ -77,5 +77,5 @@ ip `52.68.93.254` mask 24 get `52.68.93.0`, and then check `"52.68.93.4/31".Cont
 
 In extreme case, if you get a block so large like `0.0.0.0/0`, it will fallback to a traversal.So it maybe better to make some buckets, like `genTree(2)`
 
-what's more, the blocks are non-overlap. If you already get a prefixmatch cidr in 24~32 mask range, you haven't to find in 0~24.
+what's more, the blocks are non-overlap. If you already get a prefixmatch cidr in `24=>32` mask range, you haven't to find in `0=>24`.
 
