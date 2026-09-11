@@ -131,9 +131,9 @@ not:
 
 | blocks | hit | miss | buckets | memory | per block | `GenTree` |
 |---|---|---|---|---|---|---|
-| 1e3 | 35 ns | 20 ns | 1 | 0.16 MB | 166 B | 1.6 ms |
-| 1e4 | 47 ns | 41 ns | 2 | 1.25 MB | 131 B | 12.7 ms |
-| 1e5 | 72 ns | 81 ns | 4 | 11.75 MB | 123 B | 110 ms |
+| 1e3 | 35 ns | 20 ns | 1 | 0.17 MB | 182 B | 1.6 ms |
+| 1e4 | 47 ns | 41 ns | 2 | 1.27 MB | 133 B | 12.7 ms |
+| 1e5 | 72 ns | 81 ns | 4 | 11.76 MB | 123 B | 110 ms |
 | 1e6 | 72 ns | 98 ns | 5 | 112.6 MB | 118 B | 1.02 s |
 
 That is roughly **2.3x what a trie needs** — the same corpora cost
@@ -167,10 +167,16 @@ re-measure before trusting any change smaller than about 10%.
 
 | ns/op | `GenTree(2,4)` | `GenTree(0,0)` auto | 1 bucket | 8 buckets |
 |---|---|---|---|---|
-| Hit IPv4 | 48.9 | 49.0 | 225.0 | 45.0 |
-| Hit IPv6 | 32.7 | 32.8 | 32.8 | 33.3 |
-| Miss IPv4 | 55.6 | 82.3 | 33.0 | 158.1 |
-| Miss IPv6 | 46.9 | 47.6 | 25.5 | 72.9 |
+| Hit IPv4 | 35.9 | 35.9 | 213.5 | 32.4 |
+| Hit IPv6 | 34.7 | 34.7 | 34.7 | 35.2 |
+| Miss IPv4 | 11.7 | 11.7 | 11.8 | 11.7 |
+| Miss IPv6 | 48.5 | 49.5 | 27.6 | 77.5 |
+
+The IPv4 miss row no longer varies with the bucket count at all: those lookups
+never reach a bucket, because the [coarse index](#effect-of-the-coarse-index)
+answers them first. The IPv6 miss row still does, because the probe address
+sits in the same leading bytes as the corpus and so falls through — see the
+scattered figures below for the ordinary case.
 
 ### Read these numbers with care
 
@@ -184,10 +190,18 @@ corpus, same code:
 
 | ns/op | single fixed address | 8192 rotating addresses | |
 |---|---|---|---|
-| all hit | 49.0 | 90.8 | 1.9x |
-| all miss | 82.3 | 92.2 | 1.1x |
+| IPv4, all hit | 35.9 | 73.2 | 2.0x |
+| IPv4, half hit | — | 44.5 | |
+| IPv4, all miss | 11.7 | 5.4 | |
+| IPv6, all hit | 34.7 | 68.7 | 2.0x |
+| IPv6, half hit | — | 45.9 | |
+| IPv6, all miss | 48.5 | 6.6 | |
 
-Scattered hits cost about 1.9x more than the headline figure.
+Scattered hits cost about 2x the headline figure. The scattered misses are
+*faster* than the fixed ones, because the fixed miss probes were deliberately
+chosen next to the corpus — `123.123.123.123` and `2620::ffff` — which is the
+worst case for the coarse index. Ordinary misses land in uncovered space and
+are answered in one load.
 
 **They depend on the Go version more than on this package.** The lookup is
 mostly a map probe, and Go 1.24 replaced the runtime's map with a Swiss table.
@@ -278,6 +292,44 @@ Misses barely move, because a miss that never reaches a populated bucket never
 touches a block. The one-bucket case moves most: that shape is almost pure
 candidate scanning, which is exactly what got cheaper.
 
+### Effect of the coarse index
+
+The bucket structure is weakest exactly where a trie is strongest: a miss must
+probe every bucket before it can be ruled out, and an address covered by a
+short prefix still pays a full hash lookup to find out. A trie answers both
+from its root node.
+
+That root node is now present, as a flat array rather than a tree — two bits
+per slot over the leading 8 or 16 address bits, recording whether the slot is
+entirely uncovered, entirely covered, or mixed. Only the mixed case reaches the
+buckets. No per-level dependent loads are introduced, so the depth-independence
+above is untouched.
+
+It pays because real prefix sets are sparse. The AWS IPv4 ranges occupy **454
+of 65536** sixteen-bit slots, so 99.3% of scattered misses are settled by a
+single load:
+
+| ns/op | packed only | + coarse | |
+|---|---|---|---|
+| Miss IPv4 | 55.6 | 11.7 | 4.8x |
+| Miss IPv4, auto | 82.3 | 11.7 | 7.0x |
+| **Scattered IPv4, all miss** | **92.2** | **5.4** | **17x** |
+| Scattered IPv4, half hit | 96.7 | 44.5 | 2.2x |
+| Hit IPv4 | 48.9 | 35.9 | 1.4x |
+| Miss IPv6, fixed probe | 46.9 | 48.5 | 0.97x |
+| **Scattered IPv6, all miss** | — | **6.6** | |
+
+The one row that moves the wrong way is the fixed IPv6 miss. Both fixed IPv6
+probes land in *partial* slots — `2620::ffff` shares its leading bytes with
+real AWS space — so they pay for the index and get nothing back. That is the
+adversarial case, not the typical one: an ordinary IPv6 miss costs 6.6 ns.
+
+Cost is a fixed 16 KiB per family, which is noise at 1e5 blocks and would not
+be at 50, so the table narrows to 8 bits and 64 bytes below 512 blocks.
+
+A `/0` block covers every slot and so marks the whole table covered. That is
+correct, and it does mean the index buys nothing for such a set.
+
 ### A measurement trap worth naming
 
 Several memory figures in earlier revisions of this file were too low, by about
@@ -313,11 +365,14 @@ can otherwise look fast for the wrong reason. Minimum of five runs.
 
 | ns/op | cidrange | [bart][bart] | [cidranger][cidranger] | [netipx][netipx] |
 |---|---|---|---|---|
-| Hit IPv4 | 51.1 | **26.9** | 311.0 | 64.6 |
-| Miss IPv4 | 91.4 | **4.6** | 75.9 | 64.2 |
-| Hit IPv6 | **34.8** | 85.2 | 105.7 | 65.5 |
-| Miss IPv6 | 56.8 | **16.2** | 79.9 | 63.3 |
+| Hit IPv4 | 37.4 | **26.9** | 311.1 | 64.7 |
+| Miss IPv4 | 11.8 | **4.6** | 76.0 | 64.2 |
+| Hit IPv6 | **35.7** | 85.2 | 105.6 | 65.5 |
+| Miss IPv6 (adversarial probe) | 61.4 | **16.2** | 79.7 | 63.2 |
 | bytes/block @1e5 | 128 | **55** | 441 | see below |
+
+The IPv6 miss row uses `2620::ffff`, chosen to sit beside the corpus. On a
+scattered IPv6 miss this structure costs 6.6 ns.
 
 `netipx` stores merged address *ranges* rather than prefixes, so on a corpus
 with heavy adjacency it collapses to a fraction of the input and its
@@ -341,17 +396,15 @@ Measured on 256 IPv6 prefixes at increasing depth:
 
 | levels descended | cidrange | bart |
 |---|---|---|
-| 2 | 34.7 | **15.4** |
-| 4 | 34.8 | 35.2 |
-| 6 | **34.7** | 57.7 |
-| 8 | **34.7** | 82.9 |
-| 10 | **34.7** | 113.9 |
-| 12 | **34.7** | 145.4 |
-| 14 | **34.8** | 175.9 |
-| 16 | **34.7** | 206.7 |
+| 2 | 35.8 | **14.8** |
+| 4 | 35.7 | 35.1 |
+| 6 | **35.7** | 57.6 |
+| 8 | **35.8** | 83.1 |
+| 12 | **35.7** | 144.7 |
+| 16 | **38.8** | 206.6 |
 
-`bart` is linear at **~13.7 ns per level**; this structure is flat within 0.3%
-across the whole range. They cross at about **4 levels (≈ `/32`)**.
+`bart` is linear at **~13.7 ns per level**; this structure is flat. They cross
+at about **4 levels (≈ `/32`)**.
 
 That model predicts the AWS results. The IPv6 probe matches
 `2620:107:300f::/64` — 8 levels, predicting 82.9 ns against 85.2 measured. The
