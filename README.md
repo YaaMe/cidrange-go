@@ -149,6 +149,10 @@ So this fits cloud-provider IP ranges, ACLs, blocklists and geo-IP tables —
 sets loaded once at startup, refreshed occasionally, and queried constantly.
 It does not fit a live BGP table or anything mutated per request.
 
+One thing it is genuinely good at: lookup cost does not grow with prefix
+length, where a trie pays a dependent memory load per stride. See
+[Compared with a trie](#compared-with-a-trie).
+
 ## Benchmark
 
 `go test -run '^$' -bench . -benchtime 1s -count=3`, Go 1.22 on darwin/arm64
@@ -210,6 +214,84 @@ own table mostly helps misses:
 | Miss IPv4 | 65.7 ns/op | 57.2 ns/op | 1.15x |
 | Miss IPv6 | 54.4 ns/op | 49.6 ns/op | 1.10x |
 | Miss IPv4, overlap | 63.9 ns/op | 58.4 ns/op | 1.09x |
+
+## Compared with a trie
+
+All four structures below were built from the same 889 AWS prefixes and checked
+to agree on 894 probes before being timed — a structure that answers wrongly
+can otherwise look fast for the wrong reason. Minimum of five runs.
+
+> These figures come from a binary built with **Go 1.26**, because `bart`
+> requires ≥1.24. The `cidrange` column therefore does not match the Go 1.22
+> table above. Compare within this table, not across.
+
+| ns/op | cidrange | [bart][bart] | [cidranger][cidranger] | [netipx][netipx] | linear scan |
+|---|---|---|---|---|---|
+| Hit IPv4 | 72.6 | **26.9** | 310.1 | 64.5 | 3371 |
+| Miss IPv4 | 89.5 | **4.6** | 76.0 | 64.1 | 17950 |
+| Hit IPv6 | **48.1** | 85.3 | 106.0 | 65.6 | 7175 |
+| Miss IPv6 | 55.8 | **16.2** | 80.0 | 63.2 | 9166 |
+
+`bart` wins three of four, often by a lot. The exception is the IPv6 hit, and
+it is not noise — it is structural.
+
+### Why: lookup cost here is independent of prefix length
+
+A trie descends one node per stride, and each step is a **dependent load** —
+the next node's address is not known until the current one has been read, so
+the CPU cannot prefetch or overlap them. Cost grows with how deep the match
+lies.
+
+This structure's bucket masks are fixed at `GenTree` time, so its one or two
+map probes are at addresses that do not depend on each other, and the count
+does not depend on prefix length at all.
+
+Measured on 256 IPv6 prefixes at increasing depth:
+
+| levels descended | cidrange | bart |
+|---|---|---|
+| 2 | 47.9 | **14.8** |
+| 4 | 47.7 | **35.1** |
+| 6 | **47.8** | 57.6 |
+| 8 | **47.5** | 83.0 |
+| 10 | **47.7** | 113.8 |
+| 12 | **47.7** | 145.0 |
+| 14 | **47.7** | 175.7 |
+| 16 | **47.7** | 206.3 |
+
+`bart` is linear at **~13.7 ns per level**; this structure is flat within 0.8%
+across the whole range. They cross at about **5 levels (≈ `/40`)**.
+
+That model predicts the AWS results. The IPv6 probe matches
+`2620:107:300f::/64` — 8 levels, predicting 83.0 ns against 85.3 measured. The
+IPv4 probe matches `52.95.110.0/24` — 3 levels, predicting ~28 ns against 26.9
+measured.
+
+13.7 ns is far more than the handful of instructions a stride actually costs
+(`bart` resolves all nine prefix lengths within a byte using one 256-bit AND).
+The whole set fits in cache here, so this is not a DRAM miss — it is the
+serialized dependency chain itself.
+
+### The caveat that cuts the other way
+
+`bart` compresses any subtree holding a single prefix into a leaf, so a
+**sparse** set is never walked to its nominal depth. Randomly generated `/128`
+prefixes measure a flat 18.8 ns, because the descent collapses after two or
+three levels and never happens.
+
+The table above defeats that deliberately, by packing 256 siblings under one
+parent so every level is a real node. Real-world prefix sets sit somewhere
+between the two, and the sparser they are, the closer `bart` stays to its best
+case. Take the crossover as the shape of the tradeoff, not a threshold to
+design against.
+
+So: this structure is competitive where matches are deep and the set is dense —
+IPv6 especially. For shallow IPv4 prefixes, and for misses, a trie is simply
+faster, and `bart`'s 4.6 ns miss is not reachable from here.
+
+[bart]: https://github.com/gaissmai/bart
+[cidranger]: https://github.com/yl2chen/cidranger
+[netipx]: https://github.com/go4org/netipx
 
 ## Algorithm Explain
 
