@@ -9,8 +9,9 @@ and cost one of the three reasons to choose it. Keeping the corpora here also
 keeps roughly half a megabyte of data out of every `go get` of the library.
 
 ```sh
-./fetch.sh          # refresh the corpora from each provider
-go test -v ./...    # shape and correctness across all of them
+./fetch.sh                          # refresh the corpora from each provider
+go test -v ./...                    # shape, correctness, footprint
+go test -run '^$' -bench . ./...    # cross-library comparison
 ```
 
 ## Why this exists
@@ -68,6 +69,60 @@ magnitude smaller than the thing it is meant to represent.
 The shape held up at the new size (88% collapse against the snapshot's 87%), so
 the conclusions survive, but the absolute numbers describe a smaller problem
 than a caller has today.
+
+## Compared with other libraries
+
+All four are built from the same corpus and checked to agree on 4000 probes
+before being timed. Probes rotate through 8192 addresses rather than repeating
+one, which is the access pattern a caller has.
+
+Three providers are benchmarked, chosen as three different shapes: `aws` large
+and heavily collapsing, `github` fragmented, `linode` collapsing almost
+completely. All eight are checked for correctness and footprint.
+
+ns/op, minimum of three runs, Go 1.26 on darwin/arm64 (Apple M2):
+
+| corpus | mix | cidrange | bart | cidranger | netipx |
+|---|---|---|---|---|---|
+| aws | all hit | 114.0 | **58.1** | 379.3 | 126.0 |
+| aws | half hit | 66.2 | **36.1** | 223.7 | 113.9 |
+| aws | all miss | 7.3 | **6.8** | 42.7 | 91.9 |
+| github | all hit | 118.5 | **59.9** | 391.1 | 143.4 |
+| github | half hit | 66.6 | **36.5** | 229.9 | 123.9 |
+| github | all miss | 7.3 | **6.9** | 42.7 | 92.5 |
+| linode | all hit | 37.5 | **27.5** | 335.7 | 80.9 |
+| linode | half hit | 26.8 | **23.8** | 204.1 | 74.9 |
+| linode | all miss | 7.3 | **6.8** | 42.9 | 60.6 |
+
+bytes per block:
+
+| corpus | cidrange | bart | cidranger | netipx |
+|---|---|---|---|---|
+| aws | 105 | 36 | 503 | **14** |
+| gcp | 107 | 27 | 501 | **9** |
+| github | 97 | 29 | 508 | **18** |
+| linode | 136 | 22 | 497 | **1** |
+| oracle | 97 | 31 | 506 | **25** |
+
+Four things worth reading off these.
+
+**Misses are a tie.** 7.3 against 6.8 on every corpus, fragmented or not. That
+is the coarse index, and it holds on data it was never tuned against.
+
+**Hits are about 2x behind bart**, and the gap tracks fragmentation: on
+`linode`, which collapses to 95 ranges, it narrows to 37.5 against 27.5. On
+`aws` and `github` it is roughly 114 against 59.
+
+**netipx confirms the range argument and refutes the obvious conclusion from
+it.** It merges to ranges and its footprint shows it — 1 byte per block on
+`linode`, where 5505 prefixes really are 95 ranges. Yet it is the slowest on
+misses of anything here. A structure that small is entirely in cache, so the
+cost is not memory: it binary-searches, and that is log n unpredictable
+branches. Collapsing the set is worth a great deal; searching it afterwards is
+where the saving goes.
+
+**cidranger, the library this one was originally written against, is 3x to 10x
+behind everything else** and uses 500 bytes per block on every corpus.
 
 ## Provenance
 
