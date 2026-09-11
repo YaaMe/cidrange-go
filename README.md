@@ -155,10 +155,10 @@ length, where a trie pays a dependent memory load per stride. See
 
 ## Benchmark
 
-`go test -run '^$' -bench . -benchtime 1s -count=3`, Go 1.22 on darwin/arm64
-(Apple M2), 8 threads, against the 889 IPv4 and IPv6 prefixes in `testdata/`.
-The lookup path is allocation-free (`0 B/op, 0 allocs/op` throughout) and
-setup is excluded from the timings.
+`go test -run '^$' -bench . -benchtime 500ms -count=3` on darwin/arm64 (Apple
+M2), 8 threads, against the 889 IPv4 and IPv6 prefixes in `testdata/`. The
+lookup path is allocation-free (`0 B/op, 0 allocs/op` throughout) and setup is
+excluded from the timings.
 
 Figures are the **minimum** of three runs. An unloaded laptop still produced
 single samples 60% above the mode, so a single run is not a measurement —
@@ -166,10 +166,45 @@ re-measure before trusting any change smaller than about 10%.
 
 | ns/op | `GenTree(2,4)` | `GenTree(0,0)` auto | 1 bucket | 8 buckets |
 |---|---|---|---|---|
-| Hit IPv4 | 70.3 | 70.2 | 1811 | 54.7 |
-| Hit IPv6 | 47.7 | 47.5 | 47.6 | 47.5 |
-| Miss IPv4 | 57.2 | 86.3 | 33.1 | 153.1 |
-| Miss IPv6 | 49.6 | 47.7 | 25.5 | 74.5 |
+| Hit IPv4 | 70.6 | 70.3 | 1813 | 53.6 |
+| Hit IPv6 | 47.6 | 47.5 | 47.5 | 48.1 |
+| Miss IPv4 | 55.9 | 84.8 | 33.0 | 156.7 |
+| Miss IPv6 | 47.8 | 48.1 | 25.5 | 75.1 |
+
+### Read these numbers with care
+
+**They are a best case, not a typical one.** Every benchmark above probes a
+single fixed address several million times, so one map bucket stays pinned in
+L1 and every branch in the lookup is perfectly predicted. No real workload
+looks like that.
+
+`BenchmarkScattered*` rotates through 8192 distinct addresses instead. Same
+corpus, same code:
+
+| ns/op | single fixed address | 8192 rotating addresses | |
+|---|---|---|---|
+| all hit | 70.3 | 109.8 | 1.6x |
+| all miss | 84.8 | 56.2 | 0.7x |
+
+Scattered hits cost about 1.6x more than the headline figure. (Scattered
+misses come out *lower* only because the probes fall in reserved space that
+the first bucket rejects outright, where the fixed miss probe does not.)
+
+**They depend on the Go version more than on this package.** The lookup is
+mostly a map probe, and Go 1.24 replaced the runtime's map with a Swiss table.
+Because that lives in the runtime, it follows the toolchain that compiles your
+program, not the `go` directive in this module's `go.mod` — so a caller on Go
+1.24+ gets it for free:
+
+| ns/op | Go 1.22 | Go 1.26 | gain |
+|---|---|---|---|
+| Scattered, all hit | 115.6 | 109.8 | 1.05x |
+| Scattered, half hit | 113.0 | 87.1 | **1.30x** |
+| Scattered, all miss | 92.6 | 56.2 | **1.65x** |
+
+The same comparison over the fixed-address benchmarks shows **no difference at
+all** (every ratio between 0.98x and 1.08x) — further evidence that those hide
+the map cost rather than measure it.
 
 `OverlapContains` on the same set costs essentially what `Contains` does —
 70.0 / 47.5 on a hit, 58.4 / 49.1 on a miss — because probing the remaining
