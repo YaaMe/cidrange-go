@@ -14,8 +14,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The oldest version go.mod declares support for, plus current stable.
-        go: ["1.19", "stable"]
+        # The oldest version go.mod declares support for, the first release
+        # with the Swiss-table map (which changes lookup cost materially, see
+        # the README), and current stable.
+        go: ["1.19", "1.24", "stable"]
     steps:
       - uses: actions/checkout@v4
 
