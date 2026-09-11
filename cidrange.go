@@ -61,6 +61,9 @@ type ipNetTree struct {
 	bits    int
 	cidrs   []block
 	buckets []bucket
+	// coarse short-circuits lookups that a direct-indexed summary of the
+	// address space can already answer. Nil until GenTree has run.
+	coarse *coarse
 }
 
 // NewIPRanger returns an empty ranger.
@@ -168,8 +171,8 @@ func (r *IPRanger) ContainsString(ip string) bool {
 //
 // It assumes the inserted blocks do not overlap; see ContainsString.
 func (r *IPRanger) Contains(ip net.IP) bool {
-	if ip.To4() != nil {
-		return r.v4.contains(ip)
+	if ip4 := ip.To4(); ip4 != nil {
+		return r.v4.contains(ip4)
 	}
 	return r.v6.contains(ip)
 }
@@ -185,8 +188,8 @@ func (r *IPRanger) OverlapContainsString(ip string) bool {
 // probing every bucket so that overlapping, nested or duplicate blocks are
 // handled correctly. It returns false if ip is nil.
 func (r *IPRanger) OverlapContains(ip net.IP) bool {
-	if ip.To4() != nil {
-		return r.v4.overlapContains(ip)
+	if ip4 := ip.To4(); ip4 != nil {
+		return r.v4.overlapContains(ip4)
 	}
 	return r.v6.overlapContains(ip)
 }
@@ -277,6 +280,18 @@ func (t *ipNetTree) masks() []net.IPMask {
 // have to contain all of S, and therefore c, in order to contain ip - which the
 // non-overlap assumption rules out.
 func (t *ipNetTree) contains(ip net.IP) bool {
+	if len(ip)*8 != t.bits {
+		return false
+	}
+	if t.coarse != nil {
+		switch t.coarse.atIP(ip) {
+		case coarseEmpty:
+			return false
+		case coarseFull:
+			return true
+		}
+	}
+
 	var hi, lo uint64
 	packed := false
 
@@ -312,6 +327,18 @@ func (t *ipNetTree) contains(ip net.IP) bool {
 // overlapContains probes every bucket, making no assumption about the blocks
 // being disjoint.
 func (t *ipNetTree) overlapContains(ip net.IP) bool {
+	if len(ip)*8 != t.bits {
+		return false
+	}
+	if t.coarse != nil {
+		switch t.coarse.atIP(ip) {
+		case coarseEmpty:
+			return false
+		case coarseFull:
+			return true
+		}
+	}
+
 	var hi, lo uint64
 	packed := false
 
@@ -351,10 +378,12 @@ func (t *ipNetTree) genTree(buckets int) {
 	// Rebuild from scratch so repeated calls stay idempotent and pick up any
 	// blocks inserted since the last one.
 	t.buckets = nil
+	t.coarse = nil
 	if len(t.cidrs) == 0 {
 		return
 	}
 	t.sortCIDR()
+	t.coarse = newCoarse(t.cidrs, coarseWidthFor(len(t.cidrs)))
 
 	if buckets > 0 {
 		t.genTreeFixed(buckets)
