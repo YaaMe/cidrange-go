@@ -3,8 +3,49 @@
 Fast IP to CIDR blocks lookup.
 
 Built for a set that is loaded once and queried constantly — cloud-provider IP
-ranges, ACLs, blocklists — from a few dozen up to ~100k blocks. See
-[When this fits](#when-this-fits).
+ranges, ACLs, blocklists — from a few dozen up to ~100k blocks.
+
+**For most uses, [gaissmai/bart][bart] is the better choice.** It is faster on
+ordinary lookups and uses less memory. Three specific things make this package
+worth picking anyway; see [Choosing between this and bart](#choosing-between-this-and-bart).
+
+## Choosing between this and bart
+
+Measured against `bart` on an ordinary prefix set, this package ties on misses
+and is about 1.7x behind on hits, at 1.8x the memory. The
+[full comparison](#compared-with-a-trie) has the numbers. So the default
+recommendation is `bart`, and these are the cases that override it.
+
+**Lookup cost here does not grow with prefix length.** A trie descends one node
+per stride and each step is a dependent memory load, so its cost scales with how
+deep the match lies. This structure's bucket masks are fixed when `GenTree`
+runs, so its probes neither depend on each other nor grow in number:
+
+| levels descended | this | bart |
+|---|---|---|
+| 4 | 29.8 ns | 35.1 ns |
+| 8 | **30.2 ns** | 83.7 ns |
+| 16 | **29.2 ns** | 206.7 ns |
+
+The crossover is around 4 levels (≈ `/32`). The caveat is real, though: `bart`
+collapses a subtree holding a single prefix into a leaf, so a *sparse* set is
+never walked to its nominal depth and the advantage does not appear. It needs
+prefixes that are both deep and densely packed — the table above forces that
+deliberately.
+
+**It runs on older Go.** `bart` requires Go 1.24 or newer. This module declares
+Go 1.19 and is tested against it, which matters if your toolchain is pinned.
+
+**It is small enough to read.** Roughly 600 lines in one package, against a
+codebase with internal packages, generated files and three table variants. That
+is worth something when you have to audit or vendor a dependency rather than
+just import it.
+
+Things `bart` does that this does not: incremental insert (every insert here
+needs a full `GenTree`), longest-prefix *match* returning a value rather than a
+boolean, and a `netip` API. On that last point — a caller holding `net.IP` pays
+about 4 ns to convert, and `bart` still comes out ahead, so it is not a reason
+to choose this one.
 
 ## Install
 
@@ -129,14 +170,18 @@ prefixes:
 itself stays flat — that is what auto mode buys — but the other two columns do
 not:
 
-| blocks | hit | miss | buckets | memory | per block | `GenTree` |
-|---|---|---|---|---|---|---|
-| 1e3 | 35 ns | 20 ns | 1 | 0.17 MB | 182 B | 1.6 ms |
-| 1e4 | 47 ns | 41 ns | 2 | 1.27 MB | 133 B | 12.7 ms |
-| 1e5 | 72 ns | 81 ns | 4 | 11.76 MB | 123 B | 110 ms |
-| 1e6 | 72 ns | 98 ns | 5 | 112.6 MB | 118 B | 1.02 s |
+| blocks | scattered mixed | buckets | memory | per block | `GenTree` |
+|---|---|---|---|---|---|
+| 1e3 | 35.9 ns | 1 | 0.09 MB | 91 B | 1.9 ms |
+| 1e4 | 26.6 ns | 2 | 1.04 MB | 109 B | 14.5 ms |
+| 1e5 | 7.4 ns | 4 | 9.25 MB | 97 B | 116 ms |
+| 1e6 | 7.3 ns | 5 | 117.8 MB | 123 B | 1.8 s |
 
-That is roughly **2.3x what a trie needs** — the same corpora cost
+Lookup gets *faster* as the corpus grows, which is the coarse index at work
+rather than magic: a denser set covers more whole `/16`s, and a slot that is
+entirely covered is answered in one load without reaching a bucket.
+
+That is roughly **1.8x what a trie needs** — the same corpora cost
 `gaissmai/bart` 58 and 55 bytes per block at 1e4 and 1e5, and
 `yl2chen/cidranger` 470 and 441.
 
@@ -167,10 +212,10 @@ re-measure before trusting any change smaller than about 10%.
 
 | ns/op | `GenTree(2,4)` | `GenTree(0,0)` auto | 1 bucket | 8 buckets |
 |---|---|---|---|---|
-| Hit IPv4 | 35.9 | 35.9 | 213.5 | 32.4 |
-| Hit IPv6 | 34.7 | 34.7 | 34.7 | 35.2 |
-| Miss IPv4 | 11.7 | 11.7 | 11.8 | 11.7 |
-| Miss IPv6 | 48.5 | 49.5 | 27.6 | 77.5 |
+| Hit IPv4 | 29.9 | 29.8 | 220.3 | 26.4 |
+| Hit IPv6 | 28.1 | 28.2 | 28.2 | 28.5 |
+| Miss IPv4 | 11.8 | 11.8 | 11.8 | 11.7 |
+| Miss IPv6 | 40.5 | 40.4 | 23.5 | 59.7 |
 
 The IPv4 miss row no longer varies with the bucket count at all: those lookups
 never reach a bucket, because the [coarse index](#effect-of-the-coarse-index)
@@ -190,12 +235,12 @@ corpus, same code:
 
 | ns/op | single fixed address | 8192 rotating addresses | |
 |---|---|---|---|
-| IPv4, all hit | 35.9 | 73.2 | 2.0x |
-| IPv4, half hit | — | 44.5 | |
-| IPv4, all miss | 11.7 | 5.4 | |
-| IPv6, all hit | 34.7 | 68.7 | 2.0x |
-| IPv6, half hit | — | 45.9 | |
-| IPv6, all miss | 48.5 | 6.6 | |
+| IPv4, all hit | 29.9 | 70.0 | 2.3x |
+| IPv4, half hit | — | 42.3 | |
+| IPv4, all miss | 11.8 | 5.4 | |
+| IPv6, all hit | 28.1 | 74.2 | 2.6x |
+| IPv6, half hit | — | 45.8 | |
+| IPv6, all miss | 40.5 | 6.6 | |
 
 Scattered hits cost about 2x the headline figure. The scattered misses are
 *faster* than the fixed ones, because the fixed miss probes were deliberately
@@ -363,16 +408,28 @@ can otherwise look fast for the wrong reason. Minimum of five runs.
 > requires ≥1.24. The `cidrange` column therefore does not match the Go 1.22
 > table above. Compare within this table, not across.
 
+All figures below use **8192 rotating addresses** rather than one fixed probe,
+which is the access pattern a real caller has.
+
 | ns/op | cidrange | [bart][bart] | [cidranger][cidranger] | [netipx][netipx] |
 |---|---|---|---|---|
-| Hit IPv4 | 37.4 | **26.9** | 311.1 | 64.7 |
-| Miss IPv4 | 11.8 | **4.6** | 76.0 | 64.2 |
-| Hit IPv6 | **35.7** | 85.2 | 105.6 | 65.5 |
-| Miss IPv6 (adversarial probe) | 61.4 | **16.2** | 79.7 | 63.2 |
-| bytes/block @1e5 | 128 | **55** | 441 | see below |
+| IPv4, all hit | 73.2 | **42.8** | 251.1 | 89.3 |
+| IPv4, half hit | 48.0 | **26.9** | 153.8 | 85.5 |
+| IPv4, all miss | 5.3 | **5.1** | 43.6 | 71.6 |
+| IPv6, all hit | 75.8 | **66.4** | 172.9 | 101.9 |
+| IPv6, half hit | 46.5 | **40.4** | 126.9 | 89.3 |
+| IPv6, all miss | 6.7 | **5.1** | 57.5 | 69.6 |
+| bytes/block @1e5 | 97 | **55** | 441 | see below |
 
-The IPv6 miss row uses `2620::ffff`, chosen to sit beside the corpus. On a
-scattered IPv6 miss this structure costs 6.6 ns.
+`netipx` stores merged address *ranges* rather than prefixes, so on a corpus
+with heavy adjacency it collapses to a fraction of the input and its per-block
+figure is not comparable.
+
+**`bart` wins or ties every row.** Misses are effectively level — 5.3 against
+5.1 — and hits are about 1.7x behind. That is the honest summary for an
+ordinary prefix set, and it is why the section above recommends `bart` by
+default.
+
 
 `netipx` stores merged address *ranges* rather than prefixes, so on a corpus
 with heavy adjacency it collapses to a fraction of the input and its
@@ -396,19 +453,19 @@ Measured on 256 IPv6 prefixes at increasing depth:
 
 | levels descended | cidrange | bart |
 |---|---|---|
-| 2 | 35.8 | **14.8** |
-| 4 | 35.7 | 35.1 |
-| 6 | **35.7** | 57.6 |
-| 8 | **35.8** | 83.1 |
-| 12 | **35.7** | 144.7 |
-| 16 | **38.8** | 206.6 |
+| 2 | 29.1 | **14.8** |
+| 4 | 29.8 | 35.1 |
+| 6 | **29.1** | 57.6 |
+| 8 | **30.2** | 83.7 |
+| 12 | **30.3** | 144.9 |
+| 16 | **29.2** | 206.7 |
 
 `bart` is linear at **~13.7 ns per level**; this structure is flat. They cross
-at about **4 levels (≈ `/32`)**.
+at about **4 levels (≈ `/32`)**, and by 16 levels the gap is **7x**.
 
-That model predicts the AWS results. The IPv6 probe matches
-`2620:107:300f::/64` — 8 levels, predicting 82.9 ns against 85.2 measured. The
-IPv4 probe matches `52.95.110.0/24` — 3 levels, predicting ~25 ns against 26.9
+That model predicts `bart`'s AWS results. Its IPv6 probe matches
+`2620:107:300f::/64` — 8 levels, predicting 83.7 ns against 85.2 measured. Its
+IPv4 probe matches `52.95.110.0/24` — 3 levels, predicting ~28 ns against 26.9
 measured.
 
 13.7 ns is far more than the handful of instructions a stride actually costs
