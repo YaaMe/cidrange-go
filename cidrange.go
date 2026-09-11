@@ -21,6 +21,7 @@ package cidrange
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"sort"
 )
@@ -38,14 +39,25 @@ type IPRanger struct {
 	v6 *ipNetTree
 }
 
-// ipNetTree indexes blocks of a single address family by a descending series of
-// prefix masks. maskKeyList holds one mask per bucket, ordered from the longest
-// prefix to the shortest; maskTree maps a block's network address, masked by
-// its bucket's mask, to the blocks sharing that key.
+// bucket indexes one group of blocks by their network address masked to the
+// group's shortest prefix.
+type bucket struct {
+	mask  net.IPMask
+	table map[netKey][]net.IPNet
+}
+
+// ipNetTree indexes blocks of a single address family as a series of buckets,
+// ordered from the longest prefix mask to the shortest.
+//
+// Each bucket owns its table. One table shared across buckets would conflate
+// them: a netKey records masked address bytes but not the mask it was masked
+// with, so the key for 83.0.0.0/13 and for 83.0.0.0/8 are identical and the
+// two buckets' block lists would merge - lengthening every scan that touches
+// either, and making the per-key population that auto mode bounds unknowable
+// at build time.
 type ipNetTree struct {
-	cidrs       []*net.IPNet
-	maskKeyList []net.IPMask
-	maskTree    map[netKey][]net.IPNet
+	cidrs   []*net.IPNet
+	buckets []bucket
 }
 
 // NewIPRanger returns an empty ranger.
@@ -90,19 +102,48 @@ func (r *IPRanger) InsertCIDR(cidr *net.IPNet) error {
 // insert. Calling it repeatedly is safe: each call rebuilds from scratch.
 //
 // v4bucket and v6bucket set how many buckets each tree is split into. More
-// buckets mean fewer blocks scanned on a hit but more map probes on a miss;
-// values of zero or less fall back to 2 for IPv4 and 4 for IPv6. Buckets are
-// only split at a prefix-length boundary, so the resulting count is an upper
-// bound rather than an exact figure.
+// buckets mean fewer blocks scanned on a hit but more map probes on a miss.
+// Buckets are only split at a prefix-length boundary, so the count is an upper
+// bound rather than an exact figure — ViewMaskKeyList reports what was
+// actually built.
+//
+// Pass zero or less for either family to size that family automatically. Auto
+// mode does not pick a count at all: it places bucket boundaries so that no
+// single key collects more than AutoMaxPerKey blocks, which is the quantity
+// a lookup actually scans. Prefer it unless you have measured a better fixed
+// count for your own data.
 func (r *IPRanger) GenTree(v4bucket, v6bucket int) {
-	if v4bucket <= 0 {
-		v4bucket = 2
-	}
-	if v6bucket <= 0 {
-		v6bucket = 4
-	}
 	r.v4.genTree(v4bucket)
 	r.v6.genTree(v6bucket)
+}
+
+// AutoMaxPerKey returns the ceiling auto mode places on how many blocks may
+// share one bucket key, for a family holding n blocks.
+//
+// A lookup costs one map probe per bucket plus one comparison per block
+// sharing the query's key, so the ceiling trades the two against each other:
+// lowering it splits more eagerly, buying a shorter scan with an extra probe
+// on every lookup. The balance moves with n. A small set yields few buckets
+// and absorbs a longer scan cheaply; a large one cannot, since an over-long
+// scan is the failure this mode exists to prevent.
+//
+// Measured optima across synthetic BGP-shaped sets of 1e3 to 1e6 prefixes and
+// the AWS ranges fit roughly 1024/sqrt(n), clamped to [8, 64]. That is an
+// empirical fit on two corpora, not a derivation — measure your own data and
+// pass an explicit bucket count to GenTree if the difference matters to you.
+func AutoMaxPerKey(n int) int {
+	const minPerKey, maxPerKey = 8, 64
+	if n <= 0 {
+		return minPerKey
+	}
+	c := int(1024 / math.Sqrt(float64(n)))
+	if c < minPerKey {
+		return minPerKey
+	}
+	if c > maxPerKey {
+		return maxPerKey
+	}
+	return c
 }
 
 // ContainsString reports whether ip falls inside one of the inserted blocks. It
@@ -145,9 +186,10 @@ func (r *IPRanger) OverlapContains(ip net.IP) bool {
 
 // ViewMaskKeyList returns the bucket masks of the IPv4 and IPv6 trees, in the
 // order lookups consult them. It is intended for inspecting how GenTree
-// distributed the blocks; the returned slices must not be modified.
+// distributed the blocks. The slices are freshly built, but the masks within
+// them are shared with the ranger and must not be modified.
 func (r *IPRanger) ViewMaskKeyList() ([]net.IPMask, []net.IPMask) {
-	return r.v4.maskKeyList, r.v6.maskKeyList
+	return r.v4.masks(), r.v6.masks()
 }
 
 // normalizeNet reduces cidr to the canonical form for its family: a 4-byte IP
@@ -207,10 +249,16 @@ func maskKey(ip net.IP, mask net.IPMask) (netKey, bool) {
 }
 
 func newIPNetTree() *ipNetTree {
-	return &ipNetTree{
-		cidrs:    make([]*net.IPNet, 0),
-		maskTree: make(map[netKey][]net.IPNet),
+	return &ipNetTree{cidrs: make([]*net.IPNet, 0)}
+}
+
+// masks returns the bucket masks in lookup order.
+func (t *ipNetTree) masks() []net.IPMask {
+	out := make([]net.IPMask, len(t.buckets))
+	for i := range t.buckets {
+		out[i] = t.buckets[i].mask
 	}
+	return out
 }
 
 // contains walks the buckets from the longest prefix to the shortest and stops
@@ -222,17 +270,18 @@ func newIPNetTree() *ipNetTree {
 // have to contain all of S, and therefore c, in order to contain ip - which the
 // non-overlap assumption rules out.
 func (t *ipNetTree) contains(ip net.IP) bool {
-	for _, mask := range t.maskKeyList {
-		key, ok := maskKey(ip, mask)
+	for i := range t.buckets {
+		b := &t.buckets[i]
+		key, ok := maskKey(ip, b.mask)
 		if !ok {
 			continue
 		}
-		cidrs, exists := t.maskTree[key]
+		blocks, exists := b.table[key]
 		if !exists {
 			continue
 		}
-		for i := range cidrs {
-			if cidrs[i].Contains(ip) {
+		for j := range blocks {
+			if blocks[j].Contains(ip) {
 				return true
 			}
 		}
@@ -244,14 +293,15 @@ func (t *ipNetTree) contains(ip net.IP) bool {
 // overlapContains probes every bucket, making no assumption about the blocks
 // being disjoint.
 func (t *ipNetTree) overlapContains(ip net.IP) bool {
-	for _, mask := range t.maskKeyList {
-		key, ok := maskKey(ip, mask)
+	for i := range t.buckets {
+		b := &t.buckets[i]
+		key, ok := maskKey(ip, b.mask)
 		if !ok {
 			continue
 		}
-		cidrs := t.maskTree[key]
-		for i := range cidrs {
-			if cidrs[i].Contains(ip) {
+		blocks := b.table[key]
+		for j := range blocks {
+			if blocks[j].Contains(ip) {
 				return true
 			}
 		}
@@ -263,18 +313,27 @@ func (t *ipNetTree) insertCIDR(cidr *net.IPNet) {
 	t.cidrs = append(t.cidrs, cidr)
 }
 
-// genTree groups the blocks, longest prefix first, into at most buckets chunks
-// and indexes each chunk by its shortest prefix.
+// genTree builds the buckets. A positive buckets splits into that many chunks
+// by block count; zero or less bounds the per-key population instead.
 func (t *ipNetTree) genTree(buckets int) {
 	// Rebuild from scratch so repeated calls stay idempotent and pick up any
 	// blocks inserted since the last one.
-	t.maskKeyList = nil
-	t.maskTree = make(map[netKey][]net.IPNet)
+	t.buckets = nil
 	if len(t.cidrs) == 0 {
 		return
 	}
 	t.sortCIDR()
 
+	if buckets > 0 {
+		t.genTreeFixed(buckets)
+		return
+	}
+	t.genTreeAuto(AutoMaxPerKey(len(t.cidrs)))
+}
+
+// genTreeFixed groups the blocks, longest prefix first, into at most buckets
+// chunks of roughly equal block count.
+func (t *ipNetTree) genTreeFixed(buckets int) {
 	bucketSize := (len(t.cidrs) + buckets - 1) / buckets
 	var chunk []*net.IPNet
 	lastOnes, _ := t.cidrs[0].Mask.Size()
@@ -297,19 +356,111 @@ func (t *ipNetTree) genTree(buckets int) {
 	}
 }
 
+// genTreeAuto places bucket boundaries by bounding the per-key population
+// rather than the block count.
+//
+// Splitting by block count leaves the size of the final chunk to chance: it is
+// whatever remains after the last flush, and it is keyed by the shortest
+// prefix in the whole set, so an unlucky split collapses a large tail into a
+// handful of keys. Measured on a million BGP-shaped prefixes, four buckets
+// left 698 blocks under one key while three left 200 and six left 63 — a 10x
+// swing in lookup cost from a parameter that looks monotonic and is not.
+//
+// This walks the prefix-length runs from longest to shortest, extending the
+// current chunk while the worst key stays within maxPerKey and closing it when
+// the next run would push past. Extending a chunk can only shorten its mask
+// and therefore only merge keys, so the worst key is monotonic in the walk and
+// a greedy pass suffices.
+func (t *ipNetTree) genTreeAuto(maxPerKey int) {
+	bits := len(t.cidrs[0].Mask) * 8
+	chunkStart := 0
+	counts := make(map[netKey]int)
+
+	for _, r := range t.prefixRuns() {
+		trial, worst := remask(counts, t.cidrs[r.start:r.end], r.ones, bits)
+		if chunkStart < r.start && worst > maxPerKey {
+			t.solveChunk(t.cidrs[chunkStart:r.start])
+			chunkStart = r.start
+			counts, _ = remask(nil, t.cidrs[r.start:r.end], r.ones, bits)
+			continue
+		}
+		counts = trial
+	}
+	if chunkStart < len(t.cidrs) {
+		t.solveChunk(t.cidrs[chunkStart:])
+	}
+}
+
+// prefixRun is a maximal span of t.cidrs sharing one prefix length. A chunk is
+// keyed by its shortest prefix, so a run is the smallest unit a chunk boundary
+// may fall between.
+type prefixRun struct {
+	ones       int
+	start, end int
+}
+
+func (t *ipNetTree) prefixRuns() []prefixRun {
+	var runs []prefixRun
+	for i := 0; i < len(t.cidrs); {
+		ones, _ := t.cidrs[i].Mask.Size()
+		j := i + 1
+		for j < len(t.cidrs) {
+			o, _ := t.cidrs[j].Mask.Size()
+			if o != ones {
+				break
+			}
+			j++
+		}
+		runs = append(runs, prefixRun{ones: ones, start: i, end: j})
+		i = j
+	}
+	return runs
+}
+
+// remask re-keys counts at a prefix length of ones, folds in the blocks of
+// extra, and reports the largest resulting key population.
+//
+// Re-keying existing keys rather than re-deriving them from the blocks is what
+// keeps the walk cheap: masking is monotonic, so a key already masked to a
+// longer prefix can be masked again, and the work is proportional to the
+// number of distinct keys rather than the number of blocks.
+func remask(counts map[netKey]int, extra []*net.IPNet, ones, bits int) (map[netKey]int, int) {
+	mask := net.CIDRMask(ones, bits)
+	out := make(map[netKey]int, len(counts)+len(extra))
+	for key, n := range counts {
+		for i := 0; i < len(mask); i++ {
+			key[i] &= mask[i]
+		}
+		out[key] += n
+	}
+	for _, cidr := range extra {
+		if key, ok := maskKey(cidr.IP, mask); ok {
+			out[key]++
+		}
+	}
+	worst := 0
+	for _, n := range out {
+		if n > worst {
+			worst = n
+		}
+	}
+	return out, worst
+}
+
 // solveChunk registers one bucket: every block in chunk is filed under its
 // network address masked by the chunk's shortest prefix.
 func (t *ipNetTree) solveChunk(chunk []*net.IPNet) {
 	ones, bits := chunk[len(chunk)-1].Mask.Size()
 	mask := net.CIDRMask(ones, bits)
-	t.maskKeyList = append(t.maskKeyList, mask)
+	b := bucket{mask: mask, table: make(map[netKey][]net.IPNet, len(chunk))}
 	for _, cidr := range chunk {
 		key, ok := maskKey(cidr.IP, mask)
 		if !ok {
 			continue
 		}
-		t.maskTree[key] = append(t.maskTree[key], *cidr)
+		b.table[key] = append(b.table[key], *cidr)
 	}
+	t.buckets = append(t.buckets, b)
 }
 
 // sortCIDR orders the blocks by prefix length, longest first.

@@ -25,10 +25,9 @@ if err := ipranger.InsertCIDRString("192.168.1.0/24"); err != nil {
 _ = ipranger.InsertCIDRString("128.168.1.0/24")
 _ = ipranger.InsertCIDRString("52.68.93.4/31")
 
-// Bucket counts trade lookup speed against memory, never correctness.
-// The same mask length always lands in the same bucket.
-// Few blocks? 1 is fine. More buckets cost more map probes on a miss.
-ipranger.GenTree(2, 4) // default: 2 buckets for IPv4, 4 for IPv6
+// Zero means "size it for me" - recommended unless you have measured
+// a better fixed count for your own data. See Bucket sizing below.
+ipranger.GenTree(0, 0)
 
 ipranger.ContainsString("128.168.1.0") // true
 ipranger.ContainsString("192.168.2.0") // false
@@ -41,6 +40,50 @@ return `false`, and blocks inserted afterwards are invisible until `GenTree` is
 called again — it rebuilds from scratch, so calling it repeatedly is safe. Once
 `GenTree` has returned, `Contains` and `OverlapContains` only read the structure
 and are safe for concurrent use.
+
+### Bucket sizing
+
+`GenTree(v4, v6)` takes an explicit bucket count per family, or zero to size
+that family automatically.
+
+A lookup costs **one map probe per bucket**, plus **one comparison per block
+sharing the query's key**. Buckets only split at a prefix-length boundary, so
+asking for *n* buckets is a request, not a guarantee.
+
+Counting buckets turns out to be the wrong knob. A count says nothing about how
+many blocks end up under a single key, and that population is what a lookup
+actually scans. Because splitting by block count leaves the final chunk to be
+whatever remains after the last flush, the result is not even monotonic in the
+count. On a million BGP-shaped prefixes:
+
+| buckets | blocks in last bucket | worst key | lookup |
+|---|---|---|---|
+| 2 | 401k under `/8` | 1904 | 4962 ns |
+| 3 | 40k under `/8` | 200 | 70 ns |
+| **4** | **143k under `/8`** | **698** | **786 ns** |
+| 6 | 14k under `/8` | 63 | 89 ns |
+| **8** | **105k under `/8`** | **514** | **520 ns** |
+| 16 | 40k under `/8` | 200 | 87 ns |
+
+Four buckets is 11x slower than three, and eight is 6x slower than six. Nothing
+about the number predicts which.
+
+Auto mode therefore does not pick a count at all. It walks the prefix-length
+runs and places each boundary so that no key exceeds `AutoMaxPerKey(n)` blocks,
+bounding the scan directly. The resulting cost is flat across four orders of
+magnitude:
+
+| blocks | auto | buckets chosen | best fixed count | worst fixed count |
+|---|---|---|---|---|
+| 1e3 | 103 ns | 1 | 59 ns | 107 ns |
+| 1e4 | **46 ns** | 2 | 77 ns | 146 ns |
+| 1e5 | **61 ns** | 4 | 83 ns | 702 ns |
+| 1e6 | 76 ns | 5 | 73 ns | 5036 ns |
+
+At 1e4 and 1e5 auto beats *every* fixed count, because placing the boundary
+well beats any equal-count split. At 1e3 a hand-tuned count is still ~1.7x
+better — small sets are cheap to tune yourself, so pass an explicit count if
+you have measured one.
 
 ### `Contains` vs `OverlapContains`
 

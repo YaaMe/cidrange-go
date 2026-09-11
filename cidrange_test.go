@@ -2,6 +2,7 @@ package cidrange
 
 import (
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"net"
 	"os"
@@ -42,7 +43,7 @@ func TestBenchKey(t *testing.T) {
 // returned false. It is a property the structure must hold for any input, which
 // is why it is asserted over the whole corpus rather than a handful of cases.
 func TestEveryInsertedBlockIsFound(t *testing.T) {
-	for _, buckets := range []int{1, 2, 4, 8, 16} {
+	for _, buckets := range []int{0, 1, 2, 4, 8, 16} {
 		t.Run(bucketName(buckets), func(t *testing.T) {
 			overlapping := NewIPRanger()
 			insertAll(t, overlapping, awsV4Nets)
@@ -117,7 +118,7 @@ func TestBucketCountDoesNotChangeResults(t *testing.T) {
 	}
 
 	var reference []bool
-	for _, buckets := range []int{1, 2, 3, 5, 8, 13} {
+	for _, buckets := range []int{0, 1, 2, 3, 5, 8, 13} {
 		r := NewIPRanger()
 		insertAll(t, r, awsV4Nets)
 		insertAll(t, r, awsV6Nets)
@@ -133,6 +134,83 @@ func TestBucketCountDoesNotChangeResults(t *testing.T) {
 		}
 		assert.Equal(t, reference, got, "results changed at %d buckets", buckets)
 	}
+}
+
+// TestAutoBoundsPerKeyPopulation pins the guarantee auto mode makes: no key
+// collects more than AutoMaxPerKey blocks. That population is exactly what
+// a lookup scans linearly, so it is the thing worth asserting - a bucket count
+// is not, because the same count yields wildly different populations depending
+// on where the split lands.
+func TestAutoBoundsPerKeyPopulation(t *testing.T) {
+	corpora := map[string][]*net.IPNet{
+		"aws_v4":     awsV4Nets,
+		"aws_v6":     awsV6Nets,
+		"synth_10k":  synthNets(t, 10000),
+		"synth_100k": synthNets(t, 100000),
+	}
+
+	for name, nets := range corpora {
+		t.Run(name, func(t *testing.T) {
+			r := NewIPRanger()
+			insertAll(t, r, nets)
+			r.GenTree(0, 0)
+
+			for _, tree := range []*ipNetTree{r.v4, r.v6} {
+				for _, b := range tree.buckets {
+					ones, _ := b.mask.Size()
+					for key, blocks := range b.table {
+						assert.LessOrEqual(t, len(blocks), AutoMaxPerKey(len(tree.cidrs)),
+							"key %v in the /%d bucket holds %d blocks, over the auto-mode ceiling",
+							key[:4], ones, len(blocks))
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestAutoAvoidsCatastrophicSplits guards the reason auto mode exists.
+//
+// Splitting by block count leaves the tail's size to chance, so some fixed
+// counts collapse a large remainder under one key - and which counts do that
+// is not predictable from the count, nor monotonic in it. Auto must stay
+// within its ceiling on a corpus where fixed counts do not.
+//
+// Auto is not required to beat every fixed count on this metric: driving the
+// worst key to its minimum means maximising buckets, which costs a map probe
+// per bucket on every lookup. Staying under the ceiling is the guarantee.
+func TestAutoAvoidsCatastrophicSplits(t *testing.T) {
+	nets := synthNets(t, 100000)
+
+	worstKey := func(buckets int) (worst, nbuckets int) {
+		r := NewIPRanger()
+		insertAll(t, r, nets)
+		r.GenTree(buckets, buckets)
+		for _, b := range r.v4.buckets {
+			for _, blocks := range b.table {
+				if len(blocks) > worst {
+					worst = len(blocks)
+				}
+			}
+		}
+		return worst, len(r.v4.buckets)
+	}
+
+	auto, autoN := worstKey(0)
+	assert.LessOrEqual(t, auto, AutoMaxPerKey(len(nets)),
+		"auto left %d blocks under one key", auto)
+	t.Logf("auto: %d buckets, worst key %d blocks (ceiling %d)", autoN, auto, AutoMaxPerKey(len(nets)))
+
+	overCeiling := 0
+	for _, buckets := range []int{2, 3, 4, 6, 8, 12, 16} {
+		fixed, _ := worstKey(buckets)
+		if fixed > AutoMaxPerKey(len(nets)) {
+			overCeiling++
+		}
+		t.Logf("  %2d buckets: worst key %d blocks", buckets, fixed)
+	}
+	assert.Greater(t, overCeiling, 0,
+		"corpus does not discriminate: every fixed count stayed within the ceiling too")
 }
 
 func TestInsertRejectsBadInput(t *testing.T) {
@@ -265,6 +343,22 @@ func BenchmarkMissIPv6UsingAWSRanges(b *testing.B) {
 	benchmarkContains(b, net.ParseIP("2620::ffff"), 2, 4, false)
 }
 
+func BenchmarkHitIPv4UsingAWSRangesAuto(b *testing.B) {
+	benchmarkContains(b, net.ParseIP("52.95.110.1"), 0, 0, false)
+}
+
+func BenchmarkHitIPv6UsingAWSRangesAuto(b *testing.B) {
+	benchmarkContains(b, net.ParseIP("2620:107:300f::36b7:ff81"), 0, 0, false)
+}
+
+func BenchmarkMissIPv4UsingAWSRangesAuto(b *testing.B) {
+	benchmarkContains(b, net.ParseIP("123.123.123.123"), 0, 0, false)
+}
+
+func BenchmarkMissIPv6UsingAWSRangesAuto(b *testing.B) {
+	benchmarkContains(b, net.ParseIP("2620::ffff"), 0, 0, false)
+}
+
 func BenchmarkHitIPv4UsingAWSRangesOverlap(b *testing.B) {
 	benchmarkContains(b, net.ParseIP("52.95.110.1"), 2, 4, true)
 }
@@ -384,18 +478,49 @@ func insertAll(tb testing.TB, r *IPRanger, nets []*net.IPNet) {
 }
 
 func bucketName(buckets int) string {
-	switch buckets {
-	case 1:
-		return "1bucket"
-	case 2:
-		return "2buckets"
-	case 4:
-		return "4buckets"
-	case 8:
-		return "8buckets"
-	default:
-		return "16buckets"
+	if buckets <= 0 {
+		return "auto"
 	}
+	return fmt.Sprintf("%dbuckets", buckets)
+}
+
+// synthNets builds n distinct IPv4 prefixes with a length distribution loosely
+// resembling a BGP table: mostly /24, with a tail of shorter aggregates. The
+// AWS corpus is too small and too evenly shaped to exercise bucket placement.
+func synthNets(tb testing.TB, n int) []*net.IPNet {
+	tb.Helper()
+	rng := rand.New(rand.NewSource(42))
+	nets := make([]*net.IPNet, 0, n)
+	seen := make(map[string]bool, n)
+	for len(nets) < n {
+		var ones int
+		switch r := rng.Intn(100); {
+		case r < 55:
+			ones = 24
+		case r < 75:
+			ones = 20 + rng.Intn(4)
+		case r < 90:
+			ones = 16 + rng.Intn(4)
+		case r < 98:
+			ones = 12 + rng.Intn(4)
+		default:
+			ones = 8 + rng.Intn(4)
+		}
+		buf := make([]byte, 4)
+		rng.Read(buf)
+		buf[0] = 1 + byte(rng.Intn(222)) // keep clear of 0/8 and multicast
+		mask := net.CIDRMask(ones, net.IPv4len*8)
+		network := &net.IPNet{
+			IP:   net.IPv4(buf[0], buf[1], buf[2], buf[3]).To4().Mask(mask),
+			Mask: mask,
+		}
+		if seen[network.String()] {
+			continue
+		}
+		seen[network.String()] = true
+		nets = append(nets, network)
+	}
+	return nets
 }
 
 // linearContains is the reference implementation: the exhaustive scan the
