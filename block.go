@@ -72,3 +72,25 @@ func (b block) contains(hi, lo uint64) bool {
 	shift := 128 - n
 	return lo>>shift<<shift == b.lo
 }
+
+// maskKey computes the bucket key for b's network address under mask.
+//
+// It must agree exactly with maskKey, which derives the same key from a net.IP:
+// the build path uses this one and the lookup path uses that one, so any
+// divergence would file blocks under keys no query could ever produce.
+// TestMaskKeyPathsAgree pins that.
+func (b block) maskKey(mask net.IPMask) (netKey, bool) {
+	if len(mask) != net.IPv4len && len(mask) != net.IPv6len {
+		return netKey{}, false
+	}
+	var key netKey
+	binary.BigEndian.PutUint64(key[0:8], b.hi)
+	binary.BigEndian.PutUint64(key[8:16], b.lo)
+	for i := 0; i < len(mask); i++ {
+		key[i] &= mask[i]
+	}
+	// For IPv4 the mask covers only the leading four bytes. The rest of the key
+	// is already zero, because packIP leaves the low half of hi and all of lo
+	// empty for a v4 address.
+	return key, true
+}

@@ -56,15 +56,18 @@ type bucket struct {
 // either, and making the per-key population that auto mode bounds unknowable
 // at build time.
 type ipNetTree struct {
-	cidrs   []*net.IPNet
+	// bits is the address width of this tree's family, 32 or 128. A packed
+	// block does not carry its family, and the tree is the level that knows.
+	bits    int
+	cidrs   []block
 	buckets []bucket
 }
 
 // NewIPRanger returns an empty ranger.
 func NewIPRanger() *IPRanger {
 	return &IPRanger{
-		v4: newIPNetTree(),
-		v6: newIPNetTree(),
+		v4: newIPNetTree(net.IPv4len * 8),
+		v6: newIPNetTree(net.IPv6len * 8),
 	}
 }
 
@@ -89,10 +92,14 @@ func (r *IPRanger) InsertCIDR(cidr *net.IPNet) error {
 	if !ok {
 		return fmt.Errorf("cidrange: malformed network: %d-byte IP with %d-byte mask", len(cidr.IP), len(cidr.Mask))
 	}
+	packed, ok := packNet(network)
+	if !ok {
+		return fmt.Errorf("cidrange: malformed network: %s", network)
+	}
 	if isV4 {
-		r.v4.insertCIDR(network)
+		r.v4.insertBlock(packed)
 	} else {
-		r.v6.insertCIDR(network)
+		r.v6.insertBlock(packed)
 	}
 	return nil
 }
@@ -248,8 +255,8 @@ func maskKey(ip net.IP, mask net.IPMask) (netKey, bool) {
 	return key, true
 }
 
-func newIPNetTree() *ipNetTree {
-	return &ipNetTree{cidrs: make([]*net.IPNet, 0)}
+func newIPNetTree(bits int) *ipNetTree {
+	return &ipNetTree{bits: bits, cidrs: make([]block, 0)}
 }
 
 // masks returns the bucket masks in lookup order.
@@ -334,8 +341,8 @@ func (t *ipNetTree) overlapContains(ip net.IP) bool {
 	return false
 }
 
-func (t *ipNetTree) insertCIDR(cidr *net.IPNet) {
-	t.cidrs = append(t.cidrs, cidr)
+func (t *ipNetTree) insertBlock(b block) {
+	t.cidrs = append(t.cidrs, b)
 }
 
 // genTree builds the buckets. A positive buckets splits into that many chunks
@@ -360,10 +367,10 @@ func (t *ipNetTree) genTree(buckets int) {
 // chunks of roughly equal block count.
 func (t *ipNetTree) genTreeFixed(buckets int) {
 	bucketSize := (len(t.cidrs) + buckets - 1) / buckets
-	var chunk []*net.IPNet
-	lastOnes, _ := t.cidrs[0].Mask.Size()
+	var chunk []block
+	lastOnes := int(t.cidrs[0].ones)
 	for _, cidr := range t.cidrs {
-		ones, _ := cidr.Mask.Size()
+		ones := int(cidr.ones)
 		if ones != lastOnes {
 			// A chunk is keyed by its shortest prefix, so blocks of equal
 			// prefix length must not be split across chunks. That makes a
@@ -397,16 +404,15 @@ func (t *ipNetTree) genTreeFixed(buckets int) {
 // and therefore only merge keys, so the worst key is monotonic in the walk and
 // a greedy pass suffices.
 func (t *ipNetTree) genTreeAuto(maxPerKey int) {
-	bits := len(t.cidrs[0].Mask) * 8
 	chunkStart := 0
 	counts := make(map[netKey]int)
 
 	for _, r := range t.prefixRuns() {
-		trial, worst := remask(counts, t.cidrs[r.start:r.end], r.ones, bits)
+		trial, worst := remask(counts, t.cidrs[r.start:r.end], r.ones, t.bits)
 		if chunkStart < r.start && worst > maxPerKey {
 			t.solveChunk(t.cidrs[chunkStart:r.start])
 			chunkStart = r.start
-			counts, _ = remask(nil, t.cidrs[r.start:r.end], r.ones, bits)
+			counts, _ = remask(nil, t.cidrs[r.start:r.end], r.ones, t.bits)
 			continue
 		}
 		counts = trial
@@ -427,11 +433,10 @@ type prefixRun struct {
 func (t *ipNetTree) prefixRuns() []prefixRun {
 	var runs []prefixRun
 	for i := 0; i < len(t.cidrs); {
-		ones, _ := t.cidrs[i].Mask.Size()
+		ones := int(t.cidrs[i].ones)
 		j := i + 1
 		for j < len(t.cidrs) {
-			o, _ := t.cidrs[j].Mask.Size()
-			if o != ones {
+			if int(t.cidrs[j].ones) != ones {
 				break
 			}
 			j++
@@ -449,7 +454,7 @@ func (t *ipNetTree) prefixRuns() []prefixRun {
 // keeps the walk cheap: masking is monotonic, so a key already masked to a
 // longer prefix can be masked again, and the work is proportional to the
 // number of distinct keys rather than the number of blocks.
-func remask(counts map[netKey]int, extra []*net.IPNet, ones, bits int) (map[netKey]int, int) {
+func remask(counts map[netKey]int, extra []block, ones, bits int) (map[netKey]int, int) {
 	mask := net.CIDRMask(ones, bits)
 	out := make(map[netKey]int, len(counts)+len(extra))
 	for key, n := range counts {
@@ -458,8 +463,8 @@ func remask(counts map[netKey]int, extra []*net.IPNet, ones, bits int) (map[netK
 		}
 		out[key] += n
 	}
-	for _, cidr := range extra {
-		if key, ok := maskKey(cidr.IP, mask); ok {
+	for _, blk := range extra {
+		if key, ok := blk.maskKey(mask); ok {
 			out[key]++
 		}
 	}
@@ -474,20 +479,15 @@ func remask(counts map[netKey]int, extra []*net.IPNet, ones, bits int) (map[netK
 
 // solveChunk registers one bucket: every block in chunk is filed under its
 // network address masked by the chunk's shortest prefix.
-func (t *ipNetTree) solveChunk(chunk []*net.IPNet) {
-	ones, bits := chunk[len(chunk)-1].Mask.Size()
-	mask := net.CIDRMask(ones, bits)
+func (t *ipNetTree) solveChunk(chunk []block) {
+	mask := net.CIDRMask(int(chunk[len(chunk)-1].ones), t.bits)
 	b := bucket{mask: mask, table: make(map[netKey][]block, len(chunk))}
-	for _, cidr := range chunk {
-		key, ok := maskKey(cidr.IP, mask)
+	for _, blk := range chunk {
+		key, ok := blk.maskKey(mask)
 		if !ok {
 			continue
 		}
-		packedBlock, ok := packNet(cidr)
-		if !ok {
-			continue
-		}
-		b.table[key] = append(b.table[key], packedBlock)
+		b.table[key] = append(b.table[key], blk)
 	}
 	t.buckets = append(t.buckets, b)
 }
@@ -495,8 +495,6 @@ func (t *ipNetTree) solveChunk(chunk []*net.IPNet) {
 // sortCIDR orders the blocks by prefix length, longest first.
 func (t *ipNetTree) sortCIDR() {
 	sort.Slice(t.cidrs, func(i, j int) bool {
-		a, _ := t.cidrs[i].Mask.Size()
-		b, _ := t.cidrs[j].Mask.Size()
-		return a > b
+		return t.cidrs[i].ones > t.cidrs[j].ones
 	})
 }
