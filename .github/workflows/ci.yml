@@ -42,3 +42,14 @@ jobs:
 
       - name: benchmarks compile and run
         run: go test -run '^$' -bench . -benchtime 10x ./...
+
+      # bench/ is a separate module holding provider corpora and the
+      # cross-library comparison. Running it checks the library against eight
+      # providers' real ranges rather than the single snapshot in testdata/.
+      #
+      # It is skipped on the oldest job: bench depends on gaissmai/bart, which
+      # requires Go 1.24. That split is the whole reason bench is a separate
+      # module — the library itself still builds on 1.19.
+      - name: bench module
+        if: matrix.go != '1.19'
+        run: cd bench && go test -count=1 ./...

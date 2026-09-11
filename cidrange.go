@@ -43,7 +43,7 @@ type IPRanger struct {
 // group's shortest prefix.
 type bucket struct {
 	mask  net.IPMask
-	table map[netKey][]block
+	table *blockTable
 }
 
 // ipNetTree indexes blocks of a single address family as a series of buckets,
@@ -301,8 +301,8 @@ func (t *ipNetTree) contains(ip net.IP) bool {
 		if !ok {
 			continue
 		}
-		blocks, exists := b.table[key]
-		if !exists {
+		blocks := b.table.find(key)
+		if len(blocks) == 0 {
 			continue
 		}
 		// Pack lazily. A lookup that never reaches a populated bucket should
@@ -348,7 +348,7 @@ func (t *ipNetTree) overlapContains(ip net.IP) bool {
 		if !ok {
 			continue
 		}
-		blocks := b.table[key]
+		blocks := b.table.find(key)
 		if len(blocks) == 0 {
 			continue
 		}
@@ -510,15 +510,30 @@ func remask(counts map[netKey]int, extra []block, ones, bits int) (map[netKey]in
 // network address masked by the chunk's shortest prefix.
 func (t *ipNetTree) solveChunk(chunk []block) {
 	mask := net.CIDRMask(int(chunk[len(chunk)-1].ones), t.bits)
-	b := bucket{mask: mask, table: make(map[netKey][]block, len(chunk))}
+
+	// Group by key first. A map is fine here: this runs once, at build time.
+	index := make(map[netKey]int, len(chunk))
+	keys := make([]netKey, 0, len(chunk))
+	groups := make([][]block, 0, len(chunk))
 	for _, blk := range chunk {
 		key, ok := blk.maskKey(mask)
 		if !ok {
 			continue
 		}
-		b.table[key] = append(b.table[key], blk)
+		i, seen := index[key]
+		if !seen {
+			i = len(keys)
+			index[key] = i
+			keys = append(keys, key)
+			groups = append(groups, nil)
+		}
+		groups[i] = append(groups[i], blk)
 	}
-	t.buckets = append(t.buckets, b)
+
+	t.buckets = append(t.buckets, bucket{
+		mask:  mask,
+		table: newBlockTable(keys, groups, blockTableSlotsPerKey),
+	})
 }
 
 // sortCIDR orders the blocks by prefix length, longest first.
