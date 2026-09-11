@@ -158,11 +158,11 @@ func TestAutoBoundsPerKeyPopulation(t *testing.T) {
 			for _, tree := range []*ipNetTree{r.v4, r.v6} {
 				for _, b := range tree.buckets {
 					ones, _ := b.mask.Size()
-					for key, blocks := range b.table {
+					b.table.forEachGroup(func(blocks []block) {
 						assert.LessOrEqual(t, len(blocks), AutoMaxPerKey(len(tree.cidrs)),
-							"key %v in the /%d bucket holds %d blocks, over the auto-mode ceiling",
-							key[:4], ones, len(blocks))
-					}
+							"a key in the /%d bucket holds %d blocks, over the auto-mode ceiling",
+							ones, len(blocks))
+					})
 				}
 			}
 		})
@@ -187,11 +187,11 @@ func TestAutoAvoidsCatastrophicSplits(t *testing.T) {
 		insertAll(t, r, nets)
 		r.GenTree(buckets, buckets)
 		for _, b := range r.v4.buckets {
-			for _, blocks := range b.table {
+			b.table.forEachGroup(func(blocks []block) {
 				if len(blocks) > worst {
 					worst = len(blocks)
 				}
-			}
+			})
 		}
 		return worst, len(r.v4.buckets)
 	}
