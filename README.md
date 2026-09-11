@@ -2,6 +2,10 @@
 
 Fast IP to CIDR blocks lookup.
 
+Built for a set that is loaded once and queried constantly — cloud-provider IP
+ranges, ACLs, blocklists — from a few dozen up to ~100k blocks. See
+[When this fits](#when-this-fits).
+
 ## Install
 
 ```sh
@@ -100,6 +104,50 @@ below). If your set may contain nested or duplicate blocks, use
 Note that published cloud provider ranges, including the AWS ranges in
 `testdata/`, **do** contain nested and duplicate prefixes. Either de-overlap
 them before inserting, or use `OverlapContains`.
+
+## When this fits
+
+Roughly **a few dozen to ~100k blocks, in a set that rarely changes.**
+
+Two things bound that range, and neither is lookup speed.
+
+**Below ~4 blocks, just use a linear scan.** A lookup here costs a map probe
+plus a short scan; below a handful of blocks the probe is the whole cost and a
+bare loop over `net.IPNet.Contains` is cheaper. Mixed hit/miss, synthetic
+prefixes:
+
+| blocks | this | linear scan | |
+|---|---|---|---|
+| 2 | 27.3 ns | 19.2 ns | 0.7x — scan wins |
+| 4 | 27.8 ns | 28.4 ns | break-even |
+| 8 | 29.9 ns | 46.9 ns | 1.6x |
+| 32 | 26.3 ns | 166 ns | 6.3x |
+| 256 | 27.4 ns | 1212 ns | 44x |
+| 1024 | 34.0 ns | 4752 ns | 140x |
+
+**Above ~100k blocks, memory and rebuild cost start to dominate.** Lookup
+itself stays flat — that is what auto mode buys — but the other two columns do
+not:
+
+| blocks | hit | miss | buckets | memory | `GenTree` |
+|---|---|---|---|---|---|
+| 1e3 | 64 ns | 20 ns | 1 | 0.1 MB | 1.4 ms |
+| 1e4 | 52 ns | 41 ns | 2 | 1.2 MB | 12 ms |
+| 1e5 | 81 ns | 77 ns | 4 | 10.6 MB | 96 ms |
+| 1e6 | 89 ns | 93 ns | 5 | 104 MB | 1.02 s |
+
+That is about **110 bytes per block**, roughly 2x what a trie needs — the same
+corpora cost `gaissmai/bart` 58 and 55 bytes per block at 1e4 and 1e5.
+
+**The harder limit is that the set is static.** Every insert needs a full
+`GenTree` to become visible, and that rebuild is linear in the corpus: one
+second per million blocks. A structure that supports incremental insert
+(`bart`, `yl2chen/cidranger`) is the right shape for a set that changes at
+runtime, however small it is.
+
+So this fits cloud-provider IP ranges, ACLs, blocklists and geo-IP tables —
+sets loaded once at startup, refreshed occasionally, and queried constantly.
+It does not fit a live BGP table or anything mutated per request.
 
 ## Benchmark
 
