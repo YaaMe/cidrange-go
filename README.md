@@ -103,37 +103,39 @@ them before inserting, or use `OverlapContains`.
 
 ## Benchmark
 
-`go test -run '^$' -bench . -benchtime 2s`, on darwin/arm64, 8 threads. The
-lookup path is allocation-free; setup is excluded from the timings.
+`go test -run '^$' -bench . -benchtime 1s -count=3`, Go 1.22 on darwin/arm64
+(Apple M2), 8 threads, against the 889 IPv4 and IPv6 prefixes in `testdata/`.
+The lookup path is allocation-free (`0 B/op, 0 allocs/op` throughout) and
+setup is excluded from the timings.
+
+Figures are the **minimum** of three runs. An unloaded laptop still produced
+single samples 60% above the mode, so a single run is not a measurement —
+re-measure before trusting any change smaller than about 10%.
+
+| ns/op | `GenTree(2,4)` | `GenTree(0,0)` auto | 1 bucket | 8 buckets |
+|---|---|---|---|---|
+| Hit IPv4 | 70.3 | 70.2 | 1811 | 54.7 |
+| Hit IPv6 | 47.7 | 47.5 | 47.6 | 47.5 |
+| Miss IPv4 | 57.2 | 86.3 | 33.1 | 153.1 |
+| Miss IPv6 | 49.6 | 47.7 | 25.5 | 74.5 |
+
+`OverlapContains` on the same set costs essentially what `Contains` does —
+70.0 / 47.5 on a hit, 58.4 / 49.1 on a miss — because probing the remaining
+buckets is a handful of map lookups that mostly miss.
+
+Two baselines for scale:
 
 ```
-BenchmarkHitIPv4UsingAWSRanges-8           	32824452	        74.63 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHitIPv6UsingAWSRanges-8           	51008389	        47.24 ns/op	       0 B/op	       0 allocs/op
-BenchmarkMissIPv4UsingAWSRanges-8          	39046876	        65.72 ns/op	       0 B/op	       0 allocs/op
-BenchmarkMissIPv6UsingAWSRanges-8          	42058592	        54.38 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHitIPv4UsingAWSRangesOverlap-8    	34117077	        70.81 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHitIPv6UsingAWSRangesOverlap-8    	50873010	        47.08 ns/op	       0 B/op	       0 allocs/op
-BenchmarkMissIPv4UsingAWSRangesOverlap-8   	36910843	        63.94 ns/op	       0 B/op	       0 allocs/op
-BenchmarkMissIPv6UsingAWSRangesOverlap-8   	44314680	        53.82 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHitIPv4UsingAWSRanges1Bucket-8    	 1294713	      1833 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHitIPv6UsingAWSRanges1Bucket-8    	50895891	        48.98 ns/op	       0 B/op	       0 allocs/op
-BenchmarkMissIPv4UsingAWSRanges1Bucket-8   	66869596	        39.67 ns/op	       0 B/op	       0 allocs/op
-BenchmarkMissIPv6UsingAWSRanges1Bucket-8   	70479234	        28.60 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHitIPv4UsingAWSRanges8Bucket-8    	45744781	        53.27 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHitIPv6UsingAWSRanges8Bucket-8    	50265507	        47.15 ns/op	       0 B/op	       0 allocs/op
-BenchmarkMissIPv4UsingAWSRanges8Bucket-8   	14132028	       169.2 ns/op	       0 B/op	       0 allocs/op
-BenchmarkMissIPv6UsingAWSRanges8Bucket-8   	31218919	        80.49 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHitIPv4UsingSmallRanges-8         	27695250	        87.94 ns/op	       0 B/op	       0 allocs/op
-BenchmarkMissIPv4UsingSmallRanges-8        	28228693	        84.82 ns/op	       0 B/op	       0 allocs/op
-BenchmarkLinearScanIPv4-8                  	  689733	      3628 ns/op
+BenchmarkLinearScanIPv4-8      342502      3473 ns/op   // net.IPNet.Contains over all 889
+BenchmarkHitIPv4UsingSmallRanges-8   13967908    85.4 ns/op   // 2 blocks total
 ```
 
-`BenchmarkLinearScanIPv4` is the baseline this package exists to beat: calling
-`net.IPNet.Contains` over all 889 AWS prefixes in a loop.
-
-The single-bucket IPv4 hit case is the worst shape for the structure — every
-block lands in one bucket, so a hit degenerates towards a linear scan. That is
-the tradeoff `GenTree`'s bucket arguments exist to manage.
+Reading the table: **one bucket** is the structure's worst shape for a hit —
+everything lands in a single bucket, so the scan degenerates towards the linear
+baseline (1811 ns). **Eight buckets** inverts it: hits get faster but every miss
+pays eight map probes (153 ns). This is exactly the tradeoff auto mode exists to
+navigate, and on a set this small a hand-picked `(2,4)` still beats it on the
+IPv4 miss. See [Bucket sizing](#bucket-sizing).
 
 ### Effect of the allocation-free key
 
@@ -142,10 +144,24 @@ are now a fixed-size `[16]byte` array. Same machine, same benchmarks:
 
 | | before | after | |
 |---|---|---|---|
-| Hit IPv4 | 129.0 ns/op, 2 allocs | 74.63 ns/op, 0 allocs | 1.7x |
-| Hit IPv6 | 196.8 ns/op, 2 allocs | 47.24 ns/op, 0 allocs | 4.2x |
-| Miss IPv4 | 168.0 ns/op, 4 allocs | 65.72 ns/op, 0 allocs | 2.6x |
-| Miss IPv6 | 398.6 ns/op, 4 allocs | 54.38 ns/op, 0 allocs | 7.3x |
+| Hit IPv4 | 129.0 ns/op, 2 allocs | 70.3 ns/op, 0 allocs | 1.8x |
+| Hit IPv6 | 196.8 ns/op, 2 allocs | 47.7 ns/op, 0 allocs | 4.1x |
+| Miss IPv4 | 168.0 ns/op, 4 allocs | 57.2 ns/op, 0 allocs | 2.9x |
+| Miss IPv6 | 398.6 ns/op, 4 allocs | 49.6 ns/op, 0 allocs | 8.0x |
+
+### Effect of per-bucket tables
+
+Every bucket used to share one map. A key records masked address bytes but not
+the mask, so `83.0.0.0/13` and `83.0.0.0/8` hashed identically and the two
+buckets' block lists merged — answers stayed correct, since every candidate is
+verified, but scans were longer than they needed to be. Giving each bucket its
+own table mostly helps misses:
+
+| | shared table | per-bucket tables | |
+|---|---|---|---|
+| Miss IPv4 | 65.7 ns/op | 57.2 ns/op | 1.15x |
+| Miss IPv6 | 54.4 ns/op | 49.6 ns/op | 1.10x |
+| Miss IPv4, overlap | 63.9 ns/op | 58.4 ns/op | 1.09x |
 
 ## Algorithm Explain
 
