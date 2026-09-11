@@ -42,3 +42,9 @@ jobs:
 
       - name: benchmarks compile and run
         run: go test -run '^$' -bench . -benchtime 10x ./...
+
+      # bench/ is a separate module holding provider corpora. Running it here
+      # checks the library against eight providers' real ranges rather than the
+      # single snapshot in testdata/.
+      - name: bench module
+        run: cd bench && go test -count=1 ./...
