@@ -43,7 +43,7 @@ type IPRanger struct {
 // group's shortest prefix.
 type bucket struct {
 	mask  net.IPMask
-	table map[netKey][]net.IPNet
+	table map[netKey][]block
 }
 
 // ipNetTree indexes blocks of a single address family as a series of buckets,
@@ -270,6 +270,9 @@ func (t *ipNetTree) masks() []net.IPMask {
 // have to contain all of S, and therefore c, in order to contain ip - which the
 // non-overlap assumption rules out.
 func (t *ipNetTree) contains(ip net.IP) bool {
+	var hi, lo uint64
+	packed := false
+
 	for i := range t.buckets {
 		b := &t.buckets[i]
 		key, ok := maskKey(ip, b.mask)
@@ -280,8 +283,17 @@ func (t *ipNetTree) contains(ip net.IP) bool {
 		if !exists {
 			continue
 		}
+		// Pack lazily. A lookup that never reaches a populated bucket should
+		// not pay for it, and most misses never do.
+		if !packed {
+			hi, lo, ok = packIP(ip)
+			if !ok {
+				return false
+			}
+			packed = true
+		}
 		for j := range blocks {
-			if blocks[j].Contains(ip) {
+			if blocks[j].contains(hi, lo) {
 				return true
 			}
 		}
@@ -293,6 +305,9 @@ func (t *ipNetTree) contains(ip net.IP) bool {
 // overlapContains probes every bucket, making no assumption about the blocks
 // being disjoint.
 func (t *ipNetTree) overlapContains(ip net.IP) bool {
+	var hi, lo uint64
+	packed := false
+
 	for i := range t.buckets {
 		b := &t.buckets[i]
 		key, ok := maskKey(ip, b.mask)
@@ -300,8 +315,18 @@ func (t *ipNetTree) overlapContains(ip net.IP) bool {
 			continue
 		}
 		blocks := b.table[key]
+		if len(blocks) == 0 {
+			continue
+		}
+		if !packed {
+			hi, lo, ok = packIP(ip)
+			if !ok {
+				return false
+			}
+			packed = true
+		}
 		for j := range blocks {
-			if blocks[j].Contains(ip) {
+			if blocks[j].contains(hi, lo) {
 				return true
 			}
 		}
@@ -452,13 +477,17 @@ func remask(counts map[netKey]int, extra []*net.IPNet, ones, bits int) (map[netK
 func (t *ipNetTree) solveChunk(chunk []*net.IPNet) {
 	ones, bits := chunk[len(chunk)-1].Mask.Size()
 	mask := net.CIDRMask(ones, bits)
-	b := bucket{mask: mask, table: make(map[netKey][]net.IPNet, len(chunk))}
+	b := bucket{mask: mask, table: make(map[netKey][]block, len(chunk))}
 	for _, cidr := range chunk {
 		key, ok := maskKey(cidr.IP, mask)
 		if !ok {
 			continue
 		}
-		b.table[key] = append(b.table[key], *cidr)
+		packedBlock, ok := packNet(cidr)
+		if !ok {
+			continue
+		}
+		b.table[key] = append(b.table[key], packedBlock)
 	}
 	t.buckets = append(t.buckets, b)
 }
