@@ -1,4 +1,4 @@
-module github.com/yaame/cidrange-go
+module github.com/YaaMe/cidrange-go
 
 go 1.19
 
