@@ -54,7 +54,7 @@ var impls = []impl{
 		},
 	},
 	{
-		name: "bart",
+		name: "bart/Table",
 		build: func(nets []*net.IPNet) any {
 			t := new(bart.Table[struct{}])
 			for _, p := range prefixesOf(nets) {
@@ -64,6 +64,35 @@ var impls = []impl{
 		},
 		contains: func(h any, _ net.IP, addr netip.Addr) bool {
 			return h.(*bart.Table[struct{}]).Contains(addr)
+		},
+	},
+	{
+		// The membership opponent bart is actually built for: no payload at
+		// all. Suggested by bart's author in cidrange-go#6.
+		name: "bart/Lite",
+		build: func(nets []*net.IPNet) any {
+			t := new(bart.Lite)
+			for _, p := range prefixesOf(nets) {
+				t.Insert(p)
+			}
+			return t
+		},
+		contains: func(h any, _ net.IP, addr netip.Addr) bool {
+			return h.(*bart.Lite).Contains(addr)
+		},
+	},
+	{
+		// Carries a payload like Table, but trades memory for speed.
+		name: "bart/Fast",
+		build: func(nets []*net.IPNet) any {
+			t := new(bart.Fast[struct{}])
+			for _, p := range prefixesOf(nets) {
+				t.Insert(p, struct{}{})
+			}
+			return t
+		},
+		contains: func(h any, _ net.IP, addr netip.Addr) bool {
+			return h.(*bart.Fast[struct{}]).Contains(addr)
 		},
 	},
 	{

@@ -80,19 +80,36 @@ Three providers are benchmarked, chosen as three different shapes: `aws` large
 and heavily collapsing, `github` fragmented, `linode` collapsing almost
 completely. All eight are checked for correctness and footprint.
 
-ns/op, minimum of three runs, Go 1.26 on darwin/arm64 (Apple M2):
+ns/op, minimum of five runs, Go 1.26 on darwin/arm64 (Apple M2). IPv4 probes.
 
-| corpus | mix | cidrange | bart | cidranger | netipx |
-|---|---|---|---|---|---|
-| aws | all hit | 114.0 | **58.1** | 379.3 | 126.0 |
-| aws | half hit | 66.2 | **36.1** | 223.7 | 113.9 |
-| aws | all miss | 7.3 | **6.8** | 42.7 | 91.9 |
-| github | all hit | 118.5 | **59.9** | 391.1 | 143.4 |
-| github | half hit | 66.6 | **36.5** | 229.9 | 123.9 |
-| github | all miss | 7.3 | **6.9** | 42.7 | 92.5 |
-| linode | all hit | 37.5 | **27.5** | 335.7 | 80.9 |
-| linode | half hit | 26.8 | **23.8** | 204.1 | 74.9 |
-| linode | all miss | 7.3 | **6.8** | 42.9 | 60.6 |
+`bart` appears as three variants because bart's author pointed out in
+[#6](https://github.com/YaaMe/cidrange-go/issues/6) that a boolean question
+should not be put to a payload-carrying `bart.Table`, and that `bart.Fast`
+exists and is quicker than both:
+
+| corpus | mix | cidrange | bart.Table | bart.Lite | **bart.Fast** | cidranger | netipx |
+|---|---|---|---|---|---|---|---|
+| aws | all hit | 113.8 | 58.5 | 57.3 | **37.0** | 377.1 | 125.1 |
+| aws | half hit | 65.0 | 37.4 | 36.0 | **26.9** | 222.9 | 113.8 |
+| aws | all miss | 7.2 | 6.9 | 6.8 | **6.8** | 42.9 | 91.5 |
+| github | all hit | 118.3 | 59.5 | 57.7 | **36.0** | 387.6 | 143.3 |
+| github | half hit | 66.9 | 38.1 | 36.8 | **27.0** | 225.9 | 121.9 |
+| github | all miss | 7.2 | 6.9 | 6.8 | **6.8** | 43.0 | 92.1 |
+| linode | all hit | 38.5 | 27.7 | 27.3 | **14.8** | 343.3 | 80.3 |
+| linode | half hit | 26.7 | 23.7 | 23.1 | **19.1** | 205.8 | 74.3 |
+| linode | all miss | 7.2 | 6.9 | 6.8 | **6.8** | 43.0 | 60.1 |
+
+Two results, and only one of them changes anything:
+
+**`bart.Lite` is within 2% of `bart.Table`.** `Contains` never reads the
+payload, so asking a table for a boolean costs what a set costs. Naming `Lite`
+is more honest but the earlier figures were not wrong because of it.
+
+**`bart.Fast` is 1.6-1.9x faster than `bart.Table` on hits.** This one does
+change things: it means every earlier revision of these tables understated bart.
+Against `Fast`, `cidrange` is about 3x behind on hits rather than 1.7x.
+
+Misses are level across all three bart variants and this package, at ~7 ns.
 
 bytes per block:
 

@@ -11,8 +11,9 @@ worth picking anyway; see [Choosing between this and bart](#choosing-between-thi
 
 ## Choosing between this and bart
 
-Measured against `bart` on an ordinary prefix set, this package ties on misses
-and is about 1.7x behind on hits, at 1.8x the memory. The
+Measured on an ordinary prefix set, this package ties on misses and is about
+1.7x behind `bart.Table` on hits — or roughly **3x** behind `bart.Fast`, the
+faster variant — at 1.8x the memory. The
 [full comparison](#compared-with-a-trie) has the numbers. So the default
 recommendation is `bart`, and these are the cases that override it.
 
@@ -411,7 +412,21 @@ can otherwise look fast for the wrong reason. Minimum of five runs.
 All figures below use **8192 rotating addresses** rather than one fixed probe,
 which is the access pattern a real caller has.
 
-| ns/op | cidrange | [bart][bart] | [cidranger][cidranger] | [netipx][netipx] |
+> **Two caveats on this table, both found while answering [#6][issue6].**
+>
+> The `bart` column is `bart.Table`, which carries a payload it is never asked
+> for here. `bart.Lite` measures the same, but **`bart.Fast` is 1.6-1.9x
+> faster**, so every figure in that column understates bart. The reproducible
+> comparison, with all three variants, is in [bench/README.md](bench/README.md).
+>
+> The harness that produced this specific table — 889 prefixes from
+> `testdata/`, both families, with a bytes/block row — is **not in the
+> repository**. `bart` appears only in `bench/compare_test.go`, which probes
+> IPv4 over the fetched provider corpora instead. These numbers therefore
+> cannot be regenerated from anything committed and should be treated as
+> indicative until the harness is restored.
+
+| ns/op | cidrange | [bart.Table][bart] | [cidranger][cidranger] | [netipx][netipx] |
 |---|---|---|---|---|
 | IPv4, all hit | 73.2 | **42.8** | 251.1 | 89.3 |
 | IPv4, half hit | 48.0 | **26.9** | 153.8 | 85.5 |
@@ -426,7 +441,9 @@ with heavy adjacency it collapses to a fraction of the input and its per-block
 figure is not comparable.
 
 **`bart` wins or ties every row.** Misses are effectively level — 5.3 against
-5.1 — and hits are about 1.7x behind. That is the honest summary for an
+5.1. Hits are about 1.7x behind `bart.Table`, and against `bart.Fast` closer to
+**3x** (see [bench/README.md](bench/README.md), where the same probes give
+113.8 against 37.0 on the AWS corpus). That is the honest summary for an
 ordinary prefix set, and it is why the section above recommends `bart` by
 default.
 
@@ -491,6 +508,7 @@ IPv6 especially. For shallow IPv4 prefixes, and for misses, a trie is simply
 faster, and `bart`'s 4.6 ns miss is not reachable from here.
 
 [bart]: https://github.com/gaissmai/bart
+[issue6]: https://github.com/YaaMe/cidrange-go/issues/6
 [cidranger]: https://github.com/yl2chen/cidranger
 [netipx]: https://github.com/go4org/netipx
 
