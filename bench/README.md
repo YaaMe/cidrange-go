@@ -101,9 +101,14 @@ exists and is quicker than both:
 
 Two results, and only one of them changes anything:
 
-**`bart.Lite` is within 2% of `bart.Table`.** `Contains` never reads the
-payload, so asking a table for a boolean costs what a set costs. Naming `Lite`
-is more honest but the earlier figures were not wrong because of it.
+**`bart.Lite` is within 2% of `bart.Table` on speed** — `Contains` never reads
+the payload, so asking a table for a boolean costs what a set costs. But speed
+is not what separates them. bart's author
+[pointed out](https://github.com/YaaMe/cidrange-go/issues/6) that `Lite` exists
+for its **memory**: its nodes carry no room for a payload at all. Measured on a
+full routing table, 14.97 MB against `Table`'s 15.34. Saying the distinction
+"does not move any earlier number" was true of one axis and wrong about the
+other.
 
 **`bart.Fast` is 1.6-1.9x faster than `bart.Table` on hits.** This one does
 change things: it means every earlier revision of these tables understated bart.
